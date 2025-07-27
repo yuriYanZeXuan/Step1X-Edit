@@ -2,7 +2,7 @@ import math
 
 import torch
 import torch.nn.functional as F
-
+from xfuser.model_executor.layers.usp import USP
 
 try:
     import flash_attn
@@ -36,6 +36,10 @@ MEMORY_LAYOUT = {
         lambda x: x.transpose(1, 2),
         lambda x: x.transpose(1, 2),
     ),
+    "xdit": (
+        lambda x: x.transpose(1, 2),  # (B,S,A,D) -> (B,A,S,D)
+        lambda x: x.transpose(1, 2),  # (B,A,S,D) -> (B,S,A,D)
+    )
 }
 
 
@@ -121,6 +125,8 @@ def attention(
 
         # 计算输出
         x = attn @ v  # [B,A,S,D]
+    elif mode == "xdit":
+        x: torch.Tensor = USP(q, k, v, dropout_p=drop_rate, is_causal=causal)
     else:
         raise NotImplementedError(f"不支持的注意力模式: {mode}")
 

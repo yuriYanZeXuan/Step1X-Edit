@@ -15,6 +15,15 @@
 
 
 ## 🔥🔥🔥 News!!
+* Jul 09, 2025: 👋 We’ve updated the step1x-edit model and released it as [step1x-edit-v1p1](https://huggingface.co/stepfun-ai/Step1X-Edit), featuring:
+  - Added support for text-to-image (T2I) generation tasks
+  - Improved image editing quality and better instruction-following performance.
+  Quantitative evaluation on GEdit-Bench-EN (Full set). G_SC, G_PQ, and G_O refer to the metrics evaluated by GPT-4.1, while Q_SC, Q_PQ, and Q_O refer to the metrics evaluated by Qwen2.5-VL-72B.
+    |     Models    |     G_SC ⬆️   |  G_PQ ⬆️ | G_O ⬆️   |  Q_SC ⬆️ | Q_PQ ⬆️   |  Q_O ⬆️ |
+    |:------------:|:------------:|:------------:| :------------:|:------------:| :------------:|:------------:|
+    | Step1X-Edit (v1.0)  |    7.13   | 7.00 |   6.44   | 7.39 |    7.28   | 7.07 | 
+    | Step1X-Edit (v1.1)  |    7.66   | 7.35 |   6.97   | 7.65 |    7.41   | 7.35 | 
+* Jun 17, 2025: 👋 Support for Teacache and parallel inference has been added.
 * May 22, 2025: 👋 Step1X-Edit now supports Lora finetuning on a single 24GB GPU now! A hand-fixing Lora for anime characters has also been released. [Download Lora](https://huggingface.co/stepfun-ai/Step1X-Edit)
 * Apr 30, 2025: 🎉 Step1X-Edit ComfyUI Plugin is available now, thanks for the community contribution! [quank123wip/ComfyUI-Step1X-Edit](https://github.com/quank123wip/ComfyUI-Step1X-Edit) & [raykindle/ComfyUI_Step1X-Edit](https://github.com/raykindle/ComfyUI_Step1X-Edit).
 * Apr 27, 2025: 🎉 With community support, we update the inference code and model weights of Step1X-Edit-FP8. [meimeilook/Step1X-Edit-FP8](https://huggingface.co/meimeilook/Step1X-Edit-FP8) & [rkfg/Step1X-Edit-FP8](https://huggingface.co/rkfg/Step1X-Edit-FP8).
@@ -35,6 +44,7 @@
 
 If you develop/use Step1X-Edit in your projects, welcome to let us know 🎉.
 
+- A detailed introduction blog of Step1X-Edit: [Step1X-Edit执行流程](https://liwenju0.com/posts/Step1X-Edit%E6%89%A7%E8%A1%8C%E6%B5%81%E7%A8%8B-%E4%B8%80.html) by [liwenju0](https://liwenju0.com/about.html)
 - FP8 model weights: [meimeilook/Step1X-Edit-FP8](https://huggingface.co/meimeilook/Step1X-Edit-FP8) by [meimeilook](https://huggingface.co/meimeilook);  [rkfg/Step1X-Edit-FP8](https://huggingface.co/rkfg/Step1X-Edit-FP8) by [rkfg](https://huggingface.co/rkfg)
 - Step1X-Edit ComfyUI Plugin: [quank123wip/ComfyUI-Step1X-Edit](https://github.com/quank123wip/ComfyUI-Step1X-Edit) by [quank123wip](https://github.com/quank123wip); [raykindle/ComfyUI_Step1X-Edit](https://github.com/raykindle/ComfyUI_Step1X-Edit) by [raykindle](https://github.com/raykindle)
 - Training scripts: [hobart07/Step1X-Edit_train](https://github.com/hobart07/Step1X-Edit_train) by [hobart07](https://github.com/hobart07)
@@ -43,15 +53,14 @@ If you develop/use Step1X-Edit in your projects, welcome to let us know 🎉.
 - [x] Inference & Checkpoints
 - [x] Online demo (Gradio)
 - [x] Fine-tuning scripts
-- [ ] Diffusers 
-- [ ] Multi-gpus Sequence Parallel inference
+- [x] Multi-gpus Sequence Parallel inference
 - [x] FP8 Quantified weight
 - [x] ComfyUI
 
 
 
 ## 1. Introduction
-we introduce a state-of-the-art image editing model, **Step1X-Edit**, which aims to provide comparable performance against the closed-source models like GPT-4o and Gemini2 Flash. 
+We introduce a state-of-the-art image editing model, **Step1X-Edit**, which aims to provide comparable performance against the closed-source models like GPT-4o and Gemini2 Flash. 
 More specifically, we adopt the Multimodal LLM to process the reference image and user's editing instruction. A latent embedding has been extracted and integrated with a diffusion image decoder to obtain  the target image. To train the model, we build a data generation pipeline to produce a high-quality dataset. 
 For evaluation, we develop the GEdit-Bench, a novel benchmark rooted in real-world user instructions. Experimental results on GEdit-Bench demonstrate that Step1X-Edit outperforms existing open-source baselines by a substantial margin and approaches the performance of leading proprietary models, thereby making significant contributions to the field of image editing. 
 More details please refer to our [technical report](https://arxiv.org/abs/2504.17761).
@@ -60,7 +69,7 @@ More details please refer to our [technical report](https://arxiv.org/abs/2504.1
 ## 2. Model Usage
 ### 2.1  Requirements
 
-The following table shows the requirements for running Step1X-Edit model (batch size = 1, w/o cfg distillation) to edit images:
+The following table shows the requirements for running Step1X-Edit model (batch size = 1, with cfg) to edit images:
 
 |     Model    |     Peak GPU Memory (512 / 786 / 1024)  | 28 steps w flash-attn(512 / 786 / 1024) |
 |:------------:|:------------:|:------------:|
@@ -69,8 +78,22 @@ The following table shows the requirements for running Step1X-Edit model (batch 
 | Step1X-Edit + offload   |       25.9GB / 27.3GB / 29.1GB | 49.6s / 54.1s / 63.2s |
 | Step1X-Edit-FP8 + offload   |   18GB / 18GB / 18GB | 35s / 40s / 51s |
 
-* The model is tested on one H800 GPUs.
+* The model is tested on one H800 GPU.
 * We recommend to use GPUs with 80GB of memory for better generation quality and efficiency.
+
+The table below presents the speedup of several efficient methods on the Step1X-Edit model.
+
+|     Model    |     Peak GPU Memory   |  28 steps |
+|:------------:|:------------:|:------------:|
+| Step1X-Edit + TeaCache     |    49.6GB   | 16.78s | 
+| Step1X-Edit + xDiT (GPU=2) |    50.2GB   | 12.81s |
+| Step1X-Edit + xDiT (GPU=4) |    52.9GB   | 8.17s |
+| Step1X-Edit + TeaCache + xDiT (GPU=2)  |  50.7GB    | 8.94s |
+| Step1X-Edit + TeaCache + xDiT (GPU=4)  |  54.2GB |  5.82s |
+
+* The model was tested on H800 series GPUs with a resolution of 1024.
+* TeaCache's default threshold of 0.2 provides a good balance between efficiency and performance.
+* xDiT employs both CFG Parallelism and Ring Attention when using 4 GPUs, but only utilizes CFG Parallelism when operating with 2 GPUs.
 
 
 ### 2.2 Dependencies and Installation
@@ -102,11 +125,23 @@ After downloading the [model weights](https://huggingface.co/stepfun-ai/Step1X-E
 ```
 bash scripts/run_examples.sh
 ```
-The default script runs the inference code with non-quantified weights. If you want to save the GPU memory usage, you can 1) download the FP8 weights and set the `--quantized` flag in the script, or 2) set the `--offload` flag in the script to offload some modules to CPU.
+The default script runs the inference code with non-quantified weights. If you want to save the GPU memory usage, you can 1)  set the `--quantized` flag in the script, which will quantify the weights to fp8, or 2) set the `--offload` flag in the script to offload some modules to CPU.
 
 This default script runs the inference code on example inputs. The results will look like:
 <div align="center">
 <img width="1080" alt="results" src="assets/results_show.png">
+</div>
+
+
+For multi-GPU inference, you can use the following script:
+```
+bash scripts/run_examples_parallel.sh
+```
+You can change the number of GPUs (`GPU`), the configuration of xDiT (`--ulysses_degree` or `--ring_degree` or `--cfg_degree`), and whether to enable TeaCache acceleration (`--teacache`) in the script.
+
+This default script runs the inference code on example inputs. The results will look like:
+<div align="center">
+<img width="1080" alt="results" src="assets/efficient_teasar.png">
 </div>
 
 ### 2.4 Gradio Scripts
@@ -196,7 +231,7 @@ The evaluation process and related code can be found in [GEdit-Bench/EVAL.md](GE
 ```
 
 ## 6. Acknowledgement
-We would like to express our sincere thanks to the contributors of [Kohya](https://github.com/kohya-ss/sd-scripts/tree/sd3), [SD3](https://huggingface.co/stabilityai/stable-diffusion-3-medium), [FLUX](https://github.com/black-forest-labs/flux), [Qwen](https://github.com/QwenLM/Qwen2.5), [diffusers](https://github.com/huggingface/diffusers) and [HuggingFace](https://huggingface.co) teams, for their open research and exploration.
+We would like to express our sincere thanks to the contributors of [Kohya](https://github.com/kohya-ss/sd-scripts/tree/sd3), [SD3](https://huggingface.co/stabilityai/stable-diffusion-3-medium), [FLUX](https://github.com/black-forest-labs/flux), [Qwen](https://github.com/QwenLM/Qwen2.5), [xDiT](https://github.com/xdit-project/xDiT), [TeaCache](https://github.com/ali-vilab/TeaCache), [diffusers](https://github.com/huggingface/diffusers) and [HuggingFace](https://huggingface.co) teams, for their open research and exploration.
 
 
 ## 7. Disclaimer

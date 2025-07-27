@@ -1,5 +1,6 @@
 # for inference
 torch>=2.3.1
+torchvision>=0.18.1
 liger_kernel==0.5.4
 einops==0.8.1
 transformers==4.51.3
@@ -10,7 +11,7 @@ gradio==5.29.0
 
 # for finetuning
 accelerate==0.34.2
-diffusers[torch]==0.32.2
+diffusers==0.32.2
 ftfy==6.1.1
 opencv-python==4.8.1.78
 bitsandbytes==0.45.5
@@ -28,3 +29,6 @@ huggingface-hub==0.30.2
 imagesize==1.4.1
 rich==13.9.4
 sentencepiece==0.2.0
+
+# for parallel
+xfuser==0.4.3.post3

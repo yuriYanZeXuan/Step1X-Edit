@@ -13,7 +13,6 @@ from io import BytesIO
 import random
 import numpy as np
 import base64
-import magic
 import megfile
 
 def process_image(image):
@@ -21,11 +20,6 @@ def process_image(image):
     image.save(img_byte_arr, format='PNG')
     img_byte_arr = img_byte_arr.getvalue()
     return img_byte_arr
-
-def convert_image_to_base64(file_content):
-    mime_type = magic.from_buffer(file_content, mime=True)
-    base64_encoded_data = base64.b64encode(file_content).decode('utf-8')
-    return f"data:{mime_type};base64,{base64_encoded_data}"
 
 
 def set_seed(seed: int):
@@ -41,15 +35,12 @@ def set_seed(seed: int):
 
 class Qwen25VL():
     def __init__(self) -> None:     
-        attn_implementation = "flash_attention_2" if is_flash_attn_2_available() else None
         self.model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-            "/mnt/jfs-test/pretrained_models/Qwen2.5-VL-72B-Instruct-AWQ", 
+            "Qwen/Qwen2.5-VL-72B-Instruct-AWQ", 
             torch_dtype=torch.float16, 
             device_map="auto"
         ).eval()
-        self.processor = AutoProcessor.from_pretrained("/mnt/jfs-test/pretrained_models/Qwen2.5-VL-72B-Instruct-AWQ")
-
-        print(f"Using {attn_implementation} for attention implementation")
+        self.processor = AutoProcessor.from_pretrained("Qwen/Qwen2.5-VL-72B-Instruct-AWQ")
 
     def prepare_prompt(self, image_links: List = [], text_prompt: str = ""):
         if not isinstance(image_links, list):
@@ -57,17 +48,11 @@ class Qwen25VL():
         
         image_links_base64 = []
 
-        for img_link in image_links:
-            if type(img_link) == str:
-                image_links_base64.append(convert_image_to_base64(process_image(megfile.smart_open(img_link, 'rb'))))
-            else:
-                image_links_base64.append(convert_image_to_base64(process_image(img_link)))
-        
         messages = [
             {
                 "role": "user",
                 "content": [
-                    {"type": "image", "image": img_link} for img_link in image_links_base64
+                    {"type": "image", "image": img_link} for img_link in image_links
                 ] + [{"type": "text", "text": text_prompt}]
             }
         ]

@@ -395,12 +395,12 @@ def rope(pos, dim: int, theta: int):
     return out.float()
 
 
-def attention_after_rope(q, k, v, pe):
+def attention_after_rope(q, k, v, pe, mode):
     q, k = apply_rope(q, k, pe)
 
     from .attention import attention
 
-    x = attention(q, k, v, mode="flash")
+    x = attention(q, k, v, mode)
     return x
 
 
@@ -524,7 +524,7 @@ class Modulation(nn.Module):
 
 class DoubleStreamBlock(nn.Module):
     def __init__(
-        self, hidden_size: int, num_heads: int, mlp_ratio: float, qkv_bias: bool = False
+        self, hidden_size: int, num_heads: int, mlp_ratio: float, qkv_bias: bool = False, mode: str = "flash"
     ):
         super().__init__()
 
@@ -557,6 +557,7 @@ class DoubleStreamBlock(nn.Module):
             nn.Linear(mlp_hidden_dim, hidden_size, bias=True),
         )
 
+        self.mode = mode
         self.gradient_checkpointing = False
         self.cpu_offload_checkpointing = False
 
@@ -597,7 +598,7 @@ class DoubleStreamBlock(nn.Module):
         k = torch.cat((txt_k, img_k), dim=1)
         v = torch.cat((txt_v, img_v), dim=1)
 
-        attn = attention_after_rope(q, k, v, pe=pe)
+        attn = attention_after_rope(q, k, v, pe, self.mode)
         txt_attn, img_attn = attn[:, : txt.shape[1]], attn[:, txt.shape[1] :]
 
         # calculate the img bloks
@@ -650,6 +651,7 @@ class SingleStreamBlock(nn.Module):
         num_heads: int,
         mlp_ratio: float = 4.0,
         qk_scale: float | None = None,
+        mode: str = "flash"
     ):
         super().__init__()
         self.hidden_dim = hidden_size
@@ -671,6 +673,7 @@ class SingleStreamBlock(nn.Module):
         self.mlp_act = nn.GELU(approximate="tanh")
         self.modulation = Modulation(hidden_size, double=False)
 
+        self.mode = mode
         self.gradient_checkpointing = False
         self.cpu_offload_checkpointing = False
 
@@ -693,7 +696,7 @@ class SingleStreamBlock(nn.Module):
         q, k = self.norm(q, k, v)
 
         # compute attention
-        attn = attention_after_rope(q, k, v, pe=pe)
+        attn = attention_after_rope(q, k, v, pe, self.mode)
         # compute activation in mlp stream, cat again and run second linear layer
         output = self.linear2(torch.cat((attn, self.mlp_act(mlp)), 2))
         return scale_add_residual(output, mod.gate, x)
