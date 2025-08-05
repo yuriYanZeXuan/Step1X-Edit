@@ -153,6 +153,475 @@ class ImageGenerator:
         offload=False,
         lora=None,
         mode="flash",
+        version='v1.0',
+        **kwargs
+    ) -> None:
+        self.version = version
+        if os.getenv("TORCHELASTIC_RUN_ID") is not None:
+            local_rank = get_world_group().local_rank
+            torch.cuda.set_device(local_rank)
+            self.device = torch.device(f"cuda:{local_rank}")
+        else:
+            self.device = torch.device(device)
+
+        self.ae, self.dit, self.llm_encoder = load_models(
+            dit_path=dit_path,
+            ae_path=ae_path,
+            qwen2vl_model_path=qwen2vl_model_path,
+            max_length=max_length,
+            dtype=dtype,
+            device=self.device,
+            mode=mode,
+            version=version,
+        )
+        
+        if not quantized:
+            self.dit = self.dit.to(dtype=torch.bfloat16)
+        else:
+            self.dit = self.dit.to(dtype=torch.float8_e4m3fn)
+        if not offload:
+            self.dit = self.dit.to(device=self.device)
+            self.ae = self.ae.to(device=self.device)
+        self.quantized = quantized 
+        self.offload = offload
+        if lora is not None:
+            self.lora_module = equip_dit_with_lora_sd_scripts(
+                self.ae,
+                [self.llm_encoder],
+                self.dit,
+                lora,
+                device=self.dit.device,
+            )
+        else:
+            self.lora_module = None
+        self.mode = mode
+        self.use_taylor_series = kwargs.get("use_taylor_series", False)
+        if self.use_taylor_series:
+            self.taylor_series_order = kwargs.get("taylor_series_order", 1)
+            self.taylor_series_step = kwargs.get("taylor_series_step", 1)
+            self.taylor_series_epsilon = kwargs.get("taylor_series_epsilon", 1e-4)
+            self.taylor_series_max_iter = kwargs.get("taylor_series_max_iter", 10)
+            self.taylor_series_tol = kwargs.get("taylor_series_tol", 1e-6)
+            self.taylor_series_device = kwargs.get("taylor_series_device", "cuda")
+
+
+    def prepare(self, prompt, img, ref_image, ref_image_raw):
+        bs, _, h, w = img.shape
+        bs, _, ref_h, ref_w = ref_image.shape
+
+        assert h == ref_h and w == ref_w
+
+        if bs == 1 and not isinstance(prompt, str):
+            bs = len(prompt)
+        elif bs >= 1 and isinstance(prompt, str):
+            prompt = [prompt] * bs
+
+        img = rearrange(img, "b c (h ph) (w pw) -> b (h w) (c ph pw)", ph=2, pw=2)
+        ref_img = rearrange(ref_image, "b c (ref_h ph) (ref_w pw) -> b (ref_h ref_w) (c ph pw)", ph=2, pw=2)
+        if img.shape[0] == 1 and bs > 1:
+            img = repeat(img, "1 ... -> bs ...", bs=bs)
+            ref_img = repeat(ref_img, "1 ... -> bs ...", bs=bs)
+
+        img_ids = torch.zeros(h // 2, w // 2, 3)
+
+        img_ids[..., 1] = img_ids[..., 1] + torch.arange(h // 2)[:, None]
+        img_ids[..., 2] = img_ids[..., 2] + torch.arange(w // 2)[None, :]
+        img_ids = repeat(img_ids, "h w c -> b (h w) c", b=bs)
+
+        if self.version == 'v1.0':
+            ref_img_ids = torch.zeros(ref_h // 2, ref_w // 2, 3)
+        else:
+            ref_img_ids = torch.ones(ref_h // 2, ref_w // 2, 3)
+
+        ref_img_ids[..., 1] = ref_img_ids[..., 1] + torch.arange(ref_h // 2)[:, None]
+        ref_img_ids[..., 2] = ref_img_ids[..., 2] + torch.arange(ref_w // 2)[None, :]
+        ref_img_ids = repeat(ref_img_ids, "ref_h ref_w c -> b (ref_h ref_w) c", b=bs)
+
+        if isinstance(prompt, str):
+            prompt = [prompt]
+        if self.offload:
+            self.llm_encoder = self.llm_encoder.to(self.device)
+        txt, mask = self.llm_encoder(prompt, ref_image_raw)
+        if self.offload:
+            self.llm_encoder = self.llm_encoder.cpu()
+            cudagc()
+
+        txt_ids = torch.zeros(bs, txt.shape[1], 3)
+
+        img = torch.cat([img, ref_img.to(device=img.device, dtype=img.dtype)], dim=-2)
+        img_ids = torch.cat([img_ids, ref_img_ids], dim=-2)
+
+
+        return {
+            "img": img,
+            "mask": mask,
+            "img_ids": img_ids.to(img.device),
+            "llm_embedding": txt.to(img.device),
+            "txt_ids": txt_ids.to(img.device),
+        }
+
+
+    def prepare_t2i(self, prompt, img, ref_image_raw):
+        bs, _, h, w = img.shape
+
+        if bs == 1 and not isinstance(prompt, str):
+            bs = len(prompt)
+        elif bs >= 1 and isinstance(prompt, str):
+            prompt = [prompt] * bs
+
+        img = rearrange(img, "b c (h ph) (w pw) -> b (h w) (c ph pw)", ph=2, pw=2)
+        
+        if img.shape[0] == 1 and bs > 1:
+            img = repeat(img, "1 ... -> bs ...", bs=bs)
+            
+
+        img_ids = torch.zeros(h // 2, w // 2, 3)
+
+        img_ids[..., 1] = img_ids[..., 1] + torch.arange(h // 2)[:, None]
+        img_ids[..., 2] = img_ids[..., 2] + torch.arange(w // 2)[None, :]
+        img_ids = repeat(img_ids, "h w c -> b (h w) c", b=bs)
+
+
+        if isinstance(prompt, str):
+            prompt = [prompt]
+        if self.offload:
+            self.llm_encoder = self.llm_encoder.to(self.device)
+        txt, mask = self.llm_encoder(prompt, ref_image_raw)
+        if self.offload:
+            self.llm_encoder = self.llm_encoder.cpu()
+            cudagc()
+
+        txt_ids = torch.zeros(bs, txt.shape[1], 3)
+
+
+        return {
+            "img": img,
+            "mask": mask,
+            "img_ids": img_ids.to(img.device),
+            "llm_embedding": txt.to(img.device),
+            "txt_ids": txt_ids.to(img.device),
+        }
+    @staticmethod
+    def process_diff_norm(diff_norm, k):
+        pow_result = torch.pow(diff_norm, k)
+
+        result = torch.where(
+            diff_norm > 1.0,
+            pow_result,
+            torch.where(diff_norm < 1.0, torch.ones_like(diff_norm), diff_norm),
+        )
+        return result
+
+    def denoise_t2i(
+        self,
+        img: torch.Tensor,
+        img_ids: torch.Tensor,
+        llm_embedding: torch.Tensor,
+        txt_ids: torch.Tensor,
+        timesteps: list[float],
+        cfg_guidance: float = 4.5,
+        mask=None,
+        show_progress=False,
+        timesteps_truncate=0.93,
+    ):
+        if self.offload:
+            self.dit = self.dit.to(self.device)
+        if show_progress:
+            pbar = tqdm(itertools.pairwise(timesteps), desc='denoising...')
+        else:
+            pbar = itertools.pairwise(timesteps)
+        for idx, (t_curr, t_prev) in enumerate(pbar):
+            if img.shape[0] == 1 and cfg_guidance != -1:
+                img = torch.cat([img, img], dim=0)
+            t_vec = torch.full(
+                (img.shape[0],), t_curr, dtype=img.dtype, device=img.device
+            )
+            pred = self.dit(
+                img=img,
+                img_ids=img_ids,
+                txt_ids=txt_ids,
+                timesteps=t_vec,
+                llm_embedding=llm_embedding,
+                t_vec=t_vec,
+                mask=mask,
+            )
+            
+            if cfg_guidance != -1:
+                cond, uncond = (
+                    pred[0 : pred.shape[0] // 2, :],
+                    pred[pred.shape[0] // 2 :, :],
+                )
+                if t_curr > timesteps_truncate:
+                    diff = cond - uncond
+                    diff_norm = torch.norm(diff, dim=(2), keepdim=True)
+                    pred = uncond + cfg_guidance * (
+                        cond - uncond
+                    ) / self.process_diff_norm(diff_norm, k=0.4)
+                else:
+                    pred = uncond + cfg_guidance * (cond - uncond)
+            img = img[0 : img.shape[0] // 2] + (t_prev - t_curr) * pred
+        if self.offload:
+            self.dit = self.dit.cpu()
+            cudagc()
+
+        return img
+
+    def denoise(
+        self,
+        img: torch.Tensor,
+        img_ids: torch.Tensor,
+        llm_embedding: torch.Tensor,
+        txt_ids: torch.Tensor,
+        timesteps: list[float],
+        cfg_guidance: float = 4.5,
+        mask=None,
+        show_progress=False,
+        timesteps_truncate=0.93,
+    ):
+        ref_img_tensor = img[0, img.shape[1] // 2:].clone()
+        if self.offload:
+            self.dit = self.dit.to(self.device)
+        if show_progress:
+            pbar = tqdm(itertools.pairwise(timesteps), desc='denoising...')
+        else:
+            pbar = itertools.pairwise(timesteps)
+        for idx, (t_curr, t_prev) in enumerate(pbar):
+            if img.shape[0] == 1 and cfg_guidance != -1:
+                img = torch.cat([img, img], dim=0)
+            t_vec = torch.full(
+                (img.shape[0],), t_curr, dtype=img.dtype, device=img.device
+            )
+            pred = self.dit(
+                img=img,
+                img_ids=img_ids,
+                txt_ids=txt_ids,
+                timesteps=t_vec,
+                llm_embedding=llm_embedding,
+                t_vec=t_vec,
+                mask=mask,
+            )
+            pred = pred[:, :pred.shape[1] // 2]
+
+            if cfg_guidance != -1:
+                cond, uncond = (
+                    pred[0 : pred.shape[0] // 2, :],
+                    pred[pred.shape[0] // 2 :, :],
+                )
+                if t_curr > timesteps_truncate:
+                    diff = cond - uncond
+                    diff_norm = torch.norm(diff, dim=(2), keepdim=True)
+                    pred = uncond + cfg_guidance * (
+                        cond - uncond
+                    ) / self.process_diff_norm(diff_norm, k=0.4)
+                else:
+                    pred = uncond + cfg_guidance * (cond - uncond)
+            tem_img = img[0 : img.shape[0] // 2, : img.shape[1] // 2] + (t_prev - t_curr) * pred
+            img = torch.cat(
+                [
+                tem_img,
+                ref_img_tensor.unsqueeze(0),
+                ], dim=1
+            )
+        if self.offload:
+            self.dit = self.dit.cpu()
+            cudagc()
+
+        return img[:, :img.shape[1] // 2]
+
+    @staticmethod
+    def unpack(x: torch.Tensor, height: int, width: int) -> torch.Tensor:
+        return rearrange(
+            x,
+            "b (h w) (c ph pw) -> b c (h ph) (w pw)",
+            h=math.ceil(height / 16),
+            w=math.ceil(width / 16),
+            ph=2,
+            pw=2,
+        )
+
+    @staticmethod
+    def load_image(image):
+        from PIL import Image
+
+        if isinstance(image, np.ndarray):
+            image = torch.from_numpy(image).permute(2, 0, 1).float() / 255.0
+            image = image.unsqueeze(0)
+            return image
+        elif isinstance(image, Image.Image):
+            image = F.to_tensor(image.convert("RGB"))
+            image = image.unsqueeze(0)
+            return image
+        elif isinstance(image, torch.Tensor):
+            return image
+        elif isinstance(image, str):
+            image = F.to_tensor(Image.open(image).convert("RGB"))
+            image = image.unsqueeze(0)
+            return image
+        else:
+            raise ValueError(f"Unsupported image type: {type(image)}")
+
+    def output_process_image(self, resize_img, image_size):
+        res_image = resize_img.resize(image_size)
+        return res_image
+        return resize_img
+    
+    def input_process_image(self, img, img_size=512):
+        # 1. 打开图片
+        w, h = img.size
+        r = w / h 
+
+        if w > h:
+            w_new = math.ceil(math.sqrt(img_size * img_size * r))
+            h_new = math.ceil(w_new / r)
+        else:
+            h_new = math.ceil(math.sqrt(img_size * img_size / r))
+            w_new = math.ceil(h_new * r)
+        h_new = h_new // 16 * 16
+        w_new = w_new // 16 * 16
+
+        img_resized = img.resize((w_new, h_new), Image.LANCZOS)
+        return img_resized, img.size
+
+    @torch.inference_mode()
+    def generate_image(
+        self,
+        prompt,
+        negative_prompt,
+        ref_images,
+        num_steps,
+        cfg_guidance,
+        seed,
+        num_samples=1,
+        init_image=None,
+        image2image_strength=0.0,
+        show_progress=False,
+        size_level=512,
+        height=None,
+        width=None,
+    ):
+        assert num_samples == 1, "num_samples > 1 is not supported yet."
+        if ref_images == None:
+            self.task_type='t2i'
+            ref_images = Image.new('RGB', (1024, 1024))
+            ref_images_raw = ref_images
+            img_info = (width, height) if width is not None and height is not None else (1024, 1024)
+        else:
+            self.task_type = 'edit'
+            ref_images_raw, img_info = self.input_process_image(ref_images, img_size=size_level)
+        
+        if self.task_type == 'edit': 
+            width, height = ref_images_raw.width, ref_images_raw.height
+
+            ref_images_raw = self.load_image(ref_images_raw)
+            ref_images_raw = ref_images_raw.to(self.device)
+            if self.offload:
+                self.ae = self.ae.to(self.device)
+            with torch.no_grad(), torch.cuda.amp.autocast(dtype=torch.bfloat16):
+                ref_images = self.ae.encode(ref_images_raw.to(self.device) * 2 - 1)
+            if self.offload:
+                self.ae = self.ae.cpu()
+                cudagc()
+        else:
+            width, height = img_info
+            ref_images_raw = self.load_image(ref_images_raw)
+            ref_images_raw = ref_images_raw.to(self.device)
+            ref_images = None
+            
+        seed = int(seed)
+        seed = torch.Generator(device="cpu").seed() if seed < 0 else seed
+
+        t0 = time.perf_counter()
+
+        if init_image is not None:
+            init_image = self.load_image(init_image)
+            init_image = init_image.to(self.device)
+            init_image = torch.nn.functional.interpolate(init_image, (height, width))
+            if self.offload:
+                self.ae = self.ae.to(self.device)
+            init_image = self.ae.encode(init_image.to() * 2 - 1)
+            if self.offload:
+                self.ae = self.ae.cpu()
+                cudagc()
+        
+        x = torch.randn(
+            num_samples,
+            16,
+            height // 8,
+            width // 8,
+            device=self.device,
+            dtype=torch.bfloat16,
+            generator=torch.Generator(device=self.device).manual_seed(seed),
+        )
+        timesteps = sampling.get_schedule(
+            num_steps, x.shape[-1] * x.shape[-2] // 4, shift=True
+        )
+
+        if init_image is not None:
+            t_idx = int((1 - image2image_strength) * num_steps)
+            t = timesteps[t_idx]
+            timesteps = timesteps[t_idx:]
+            x = t * x + (1.0 - t) * init_image.to(x.dtype)
+
+        x = torch.cat([x, x], dim=0)
+        if self.task_type == 'edit':
+            ref_images = torch.cat([ref_images, ref_images], dim=0)
+            ref_images_raw = torch.cat([ref_images_raw, ref_images_raw], dim=0)
+            inputs = self.prepare([prompt, negative_prompt], x, ref_image=ref_images, ref_image_raw=ref_images_raw)
+        else:
+            ref_images_raw = torch.cat([ref_images_raw, ref_images_raw], dim=0)
+            inputs = self.prepare_t2i([prompt, negative_prompt], x, ref_images_raw)
+
+        
+
+        with torch.autocast(device_type=self.device.type, dtype=torch.bfloat16):
+            if self.task_type == 'edit':
+                x = self.denoise(
+                    **inputs,
+                    cfg_guidance=cfg_guidance,
+                    timesteps=timesteps,
+                    show_progress=show_progress,
+                    timesteps_truncate=0.93,
+                )
+            else:
+                x = self.denoise_t2i(
+                    **inputs,
+                    cfg_guidance=cfg_guidance,
+                    timesteps=timesteps,
+                    show_progress=show_progress,
+                    timesteps_truncate=0.93,
+                )
+        x = self.unpack(x.float(), height, width)
+        if self.offload:
+            self.ae = self.ae.to(self.device)
+        x = self.ae.decode(x)
+        if self.offload:
+            self.ae = self.ae.cpu()
+            cudagc()
+        x = x.clamp(-1, 1)
+        x = x.mul(0.5).add(0.5)
+
+        t1 = time.perf_counter()
+        if os.getenv("TORCHELASTIC_RUN_ID") is None or dist.get_rank() == 0:
+            print(f"Done in {t1 - t0:.1f}s.")
+        images_list = []
+        for img in x.float():
+            images_list.append(self.output_process_image(F.to_pil_image(img), img_info))
+        return images_list
+
+
+class ImageGeneratorBackUp:
+    def __init__(
+        self,
+        dit_path=None,
+        ae_path=None,
+        qwen2vl_model_path=None,
+        device="cuda",
+        max_length=640,
+        dtype=torch.bfloat16,
+        quantized=False,
+        offload=False,
+        lora=None,
+        mode="flash",
         version='v1.0'
     ) -> None:
         self.version = version
@@ -599,7 +1068,6 @@ class ImageGenerator:
             images_list.append(self.output_process_image(F.to_pil_image(img), img_info))
         return images_list
 
-
 def main():
     torch.backends.cudnn.deterministic = True
 
@@ -645,7 +1113,7 @@ def main():
     image_edit = ImageGenerator(
         ae_path=os.path.join(args.model_path, 'vae.safetensors'),
         dit_path=os.path.join(args.model_path, ckpt_name),
-        qwen2vl_model_path=os.path.join(args.model_path, 'Qwen2.5-VL-7B-Instruct'),
+        qwen2vl_model_path='/root/autodl-tmp/weights/qwen2.5vl',
         max_length=640,
         quantized=args.quantized,
         offload=args.offload,

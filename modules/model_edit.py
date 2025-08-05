@@ -1,6 +1,6 @@
 import math
 from dataclasses import dataclass
-
+import logging
 import numpy as np
 import torch
 
@@ -10,7 +10,7 @@ from torch import Tensor, nn
 
 from .connector_edit import Qwen2Connector
 from .layers import DoubleStreamBlock, EmbedND, LastLayer, MLPEmbedder, SingleStreamBlock
-
+logger = logging.getLogger(__name__)
 
 @dataclass
 class Step1XParams:
@@ -290,9 +290,18 @@ class Step1XEdit(nn.Module):
         t_vec: Tensor,
         mask: Tensor,
     ) -> Tensor:
+        # 使用CUDA统计model函数的运行时间并用logger打印
+        torch.cuda.synchronize()
+        start_event = torch.cuda.Event(enable_timing=True)
+        end_event = torch.cuda.Event(enable_timing=True)
+        start_event.record()
         txt, y = self.connector(
             llm_embedding, t_vec, mask
         )
+        end_event.record()
+        torch.cuda.synchronize()
+        logger.info(f"connector函数运行时间: {start_event.elapsed_time(end_event)} ms")
+        
         if img.ndim != 3 or txt.ndim != 3:
             raise ValueError("Input img and txt tensors must have 3 dimensions.")
 
@@ -303,8 +312,14 @@ class Step1XEdit(nn.Module):
         txt = self.txt_in(txt)
         ids = torch.cat((txt_ids, img_ids), dim=1)
         pe = self.pe_embedder(ids)
-
+        
+        # 使用CUDA统计model函数的运行时间并用logger打印
+        torch.cuda.synchronize()
+        start_event = torch.cuda.Event(enable_timing=True)
+        end_event = torch.cuda.Event(enable_timing=True)
+        start_event.record()
         if not self.blocks_to_swap:
+            logger.info(f"not self.blocks_to_swap")
             for block in self.double_blocks:
                 img, txt = block(img=img, txt=txt, vec=vec, pe=pe)
 
@@ -312,6 +327,7 @@ class Step1XEdit(nn.Module):
             for block in self.single_blocks:
                 img = block(img, vec=vec, pe=pe)
         else:
+            logger.info(f"self.blocks_to_swap")
             for block_idx, block in enumerate(self.double_blocks):
                 self.offloader_double.wait_for_block(block_idx)
                 img, txt = block(img=img, txt=txt, vec=vec, pe=pe)
@@ -324,6 +340,9 @@ class Step1XEdit(nn.Module):
                 img = block(img, vec=vec, pe=pe)
                 self.offloader_single.submit_move_blocks(self.single_blocks, block_idx)
         img = img[:, txt.shape[1] :, ...]
+        end_event.record()
+        torch.cuda.synchronize()
+        logger.info(f"model函数运行时间: {start_event.elapsed_time(end_event)} ms")
 
         if self.training and self.cpu_offload_checkpointing:
             img = img.to(self.device)

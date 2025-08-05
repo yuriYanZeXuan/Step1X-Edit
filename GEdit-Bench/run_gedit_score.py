@@ -69,12 +69,12 @@ def find_files_with_given_basename(folder_path, basename):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_name", type=str, default="step1x", help="edit model name")
-    parser.add_argument("--edited_images_dir", type=str, default="edit_images", help="path to edited images")
+    parser.add_argument("--edited_images_dir", type=str, default="/root/autodl-tmp/hf/datasets--Shiyu95--gedit_results/snapshots/c23c3557316c814b452fa83cbebac273fd6701e2/gedit_results", help="path to edited images")
     parser.add_argument("--instruction_language", type=str, default="all", choices=["all", "en", "cn"])
     parser.add_argument("--task_type", type=str, default="all",  choices=["all", "background_change", "color_alter", "material_alter", "motion_change", 
     "ps_human", "style_change", "subject-add", "subject-remove", "subject-replace", "text_change", "tone_transfer"])
     parser.add_argument("--save_dir", type=str, default="csv_results")
-    parser.add_argument("--backbone", type=str, default="gpt4o", choices=["gpt4o", "qwen25vl"])
+    parser.add_argument("--backbone", type=str, default="qwen25vl_api", choices=["gpt4o", "qwen25vl", "qwen25vl_api"])
     args = parser.parse_args()
     model_name = args.model_name
     edited_images_dir = args.edited_images_dir
@@ -88,8 +88,9 @@ if __name__ == "__main__":
         groups = [args.task_type]
 
     # Load GEdit-Bench dataset and group by task type
-    vie_score = VIEScore(backbone=backbone, task="tie", key_path='secret.env')
-    dataset = load_dataset("stepfun-ai/GEdit-Bench")
+    vie_score = VIEScore(backbone=backbone, task="tie", key_path='secret.env' if backbone =='gpt-4o' else 'viescore/mllm_tools/secret_t3.env')
+    # dataset = load_dataset("stepfun-ai/GEdit-Bench")
+    dataset = load_dataset("/root/autodl-tmp/hf/datasets/stepfun-ai___g_edit-bench/default/0.0.0/50766778e2a737474c7e9bdf84cdce82c3ea3f4f")
     dataset_by_group = defaultdict(list)
     for i, item in tqdm(enumerate(dataset['train']), desc=f"Loading GEdit-Bench dataset..."):
         if instruction_language == "all" or item['instruction_language'] == instruction_language:
@@ -112,18 +113,22 @@ if __name__ == "__main__":
             print(f"{model_name} - {group_name} exsits, skip this group")
             continue
         
-        if backbone == "gpt4o":
-            with ThreadPoolExecutor(max_workers=6) as executor:
+        if backbone in ["gpt4o", "qwen25vl_api"]:
+            with ThreadPoolExecutor(max_workers=5) as executor:
                 futures = []
                 for item in group_dataset_list:
                     key = item['key']
-                    try:
+                    # try:
                         # Should organize edited image directory, please refer EVAL.md for details
-                        edited_images_path = os.path.join(edited_images_dir, model_name, 'fullset', group_name, item['instruction_language'])
-                        item['edited_image_path'] = os.path.join(edited_images_path, find_files_with_given_basename(edited_images_path, key)[0])
-                    except:
-                        print(key, "not found in", edited_images_path)
-                        continue
+                    edited_images_path = os.path.join(edited_images_dir, model_name, 'fullset', group_name, item['instruction_language'])
+                    print(edited_images_path,key)
+                    item['edited_image_path'] = os.path.join(edited_images_path, find_files_with_given_basename(edited_images_path, key)[0])
+                        
+                    # except:
+                    #     print()
+                    #     print(key, "not found in", edited_images_path)
+                    #     exit(0)
+                    #     continue
 
                     # Check if this sample has already been processed
                     future = executor.submit(process_single_item, item, vie_score)

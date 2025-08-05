@@ -27,6 +27,8 @@ from einops import rearrange
 from liger_kernel.ops.rms_norm import LigerRMSNormFunction
 from torch import Tensor, nn
 from torch.utils.checkpoint import checkpoint
+import logging
+logger = logging.getLogger(__name__)
 
 try:
     import flash_attn
@@ -396,10 +398,10 @@ def rope(pos, dim: int, theta: int):
 
 
 def attention_after_rope(q, k, v, pe, mode):
-    q, k = apply_rope(q, k, pe)
-
     from .attention import attention
-
+    
+    q, k = apply_rope(q, k, pe)
+    
     x = attention(q, k, v, mode)
     return x
 
@@ -738,3 +740,42 @@ class LastLayer(nn.Module):
         x = (1 + scale[:, None, :]) * self.norm_final(x) + shift[:, None, :]
         x = self.linear(x)
         return x
+
+def warmup_compiled_functions(device="cuda"):
+    """预热编译的函数，避免第一次调用时的编译延迟"""
+    print("正在预热编译的函数...")
+    
+    # 创建示例输入
+    batch_size, seq_len, num_heads, head_dim = 1, 64, 8, 64
+    xq = torch.randn(batch_size, seq_len, num_heads, head_dim, device=device)
+    xk = torch.randn(batch_size, seq_len, num_heads, head_dim, device=device)
+    freqs_cis = torch.randn(batch_size, seq_len, head_dim//2, 2, device=device)
+    
+    # 预热 apply_rope
+    try:
+        _ = apply_rope(xq, xk, freqs_cis)
+        print("✓ apply_rope 预热完成")
+    except Exception as e:
+        print(f"✗ apply_rope 预热失败: {e}")
+    
+    # 预热 scale_add_residual
+    try:
+        x = torch.randn(1, 64, 512, device=device)
+        scale = torch.randn(512, device=device)
+        residual = torch.randn(1, 64, 512, device=device)
+        _ = scale_add_residual(x, scale, residual)
+        print("✓ scale_add_residual 预热完成")
+    except Exception as e:
+        print(f"✗ scale_add_residual 预热失败: {e}")
+    
+    # 预热 layernorm_and_scale_shift
+    try:
+        x = torch.randn(1, 64, 512, device=device)
+        scale = torch.randn(512, device=device)
+        shift = torch.randn(512, device=device)
+        _ = layernorm_and_scale_shift(x, scale, shift)
+        print("✓ layernorm_and_scale_shift 预热完成")
+    except Exception as e:
+        print(f"✗ layernorm_and_scale_shift 预热失败: {e}")
+    
+    print("预热完成！")

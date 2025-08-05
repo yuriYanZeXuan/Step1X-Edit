@@ -96,7 +96,7 @@ class GPT4v():
             print("API key not found.")
             exit(1)
 
-        self.url = "https://api.openai.com/v1/chat/completions"
+        self.url = "https://jeniya.cn/v1/chat/completions"
         self.model_name = model_name
         self.use_encode = are_images_encoded
 

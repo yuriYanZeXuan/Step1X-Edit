@@ -1,4 +1,5 @@
 import torch
+import logging
 from qwen_vl_utils import process_vision_info
 from transformers import (
     AutoProcessor,
@@ -6,6 +7,8 @@ from transformers import (
     Qwen2_5_VLForConditionalGeneration,
 )
 from torchvision.transforms import ToPILImage
+# 配置日志
+logger = logging.getLogger(__name__)
 
 to_pil = ToPILImage()
 
@@ -182,7 +185,16 @@ User Prompt:'''
             idx2 = (new_txt_ids == 151653).nonzero(as_tuple=True)[1][0]
             inputs.input_ids = torch.cat([old_inputs_ids[0, :idx1], new_txt_ids[0, idx2:]],dim=0).unsqueeze(0).to("cuda")
             inputs.attention_mask= (inputs.input_ids>0).long().to("cuda")
+            # 使用CUDA统计model函数的运行时间并用logger打印
+            torch.cuda.synchronize()
+            start_event = torch.cuda.Event(enable_timing=True)
+            end_event = torch.cuda.Event(enable_timing=True)
+            start_event.record()
             outputs = self.model(input_ids = inputs.input_ids, attention_mask = inputs.attention_mask, pixel_values = inputs.pixel_values.to("cuda"), image_grid_thw = inputs.image_grid_thw.to("cuda"), output_hidden_states=True)
+            end_event.record()
+            torch.cuda.synchronize()
+            logger.info(f"model函数运行时间: {start_event.elapsed_time(end_event)} ms")
+            
             # outputs = self.model.base_model(input_ids = inputs.input_ids, attention_mask = inputs.attention_mask, pixel_values = inputs.pixel_values.to("cuda"), image_grid_thw = inputs.image_grid_thw.to("cuda"), output_hidden_states=True)
 
             emb = outputs['hidden_states'][-1]

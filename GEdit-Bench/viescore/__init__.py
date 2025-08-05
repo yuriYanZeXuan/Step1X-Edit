@@ -36,6 +36,9 @@ class VIEScore:
         elif self.backbone_name == "qwen25vl":
             from mllm_tools.qwen25vl_eval import Qwen25VL
             self.model = Qwen25VL()
+        elif self.backbone_name == "qwen25vl_api":
+            from mllm_tools.qwen25vl_apieval import Qwen25VL
+            self.model = Qwen25VL(key_path,model_name="qwen2.5-vl-72b-instruct")
         else:
             raise NotImplementedError("backbone not supported")
         self.context = vie_prompts._context_no_delimit

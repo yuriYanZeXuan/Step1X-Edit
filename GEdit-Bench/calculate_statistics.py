@@ -117,7 +117,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_name", type=str, default="step1x")
     parser.add_argument("--backbone", type=str, default="gpt4o", choices=["gpt4o", "qwen25vl"])
-    parser.add_argument("--save_path", type=str, default="/results/")
+    parser.add_argument("--save_path", type=str, default="csv_results/")
     parser.add_argument("--language", type=str, default="all", choices=["all", "en", "cn"])
     args = parser.parse_args()
     model_name = args.model_name
