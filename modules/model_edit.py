@@ -289,7 +289,12 @@ class Step1XEdit(nn.Module):
         llm_embedding: Tensor,
         t_vec: Tensor,
         mask: Tensor,
+        **kwargs,
     ) -> Tensor:
+        
+        cache_dic = kwargs.get('cache_dic', None)
+        current = kwargs.get('current', None)
+        
         # 使用CUDA统计model函数的运行时间并用logger打印
         torch.cuda.synchronize()
         start_event = torch.cuda.Event(enable_timing=True)
@@ -313,6 +318,8 @@ class Step1XEdit(nn.Module):
         ids = torch.cat((txt_ids, img_ids), dim=1)
         pe = self.pe_embedder(ids)
         
+        cal_type(cache_dic=cache_dic, current=current)
+        
         # 使用CUDA统计model函数的运行时间并用logger打印
         torch.cuda.synchronize()
         start_event = torch.cuda.Event(enable_timing=True)
@@ -321,24 +328,41 @@ class Step1XEdit(nn.Module):
         if not self.blocks_to_swap:
             logger.info(f"not self.blocks_to_swap")
             for block in self.double_blocks:
-                img, txt = block(img=img, txt=txt, vec=vec, pe=pe)
+                current['layer'] = i
+                img, txt = block(img=img, txt=txt, vec=vec, pe=pe, cache_dic=cache_dic, current=current)
 
             img = torch.cat((txt, img), 1)
+            
+            if cache_dic['Delta-DiT']:
+                delta_base = img
+            
             for block in self.single_blocks:
-                img = block(img, vec=vec, pe=pe)
+                current['layer'] = i
+                img = block(img, vec=vec, pe=pe, cache_dic=cache_dic, current=current)
         else:
             logger.info(f"self.blocks_to_swap")
             for block_idx, block in enumerate(self.double_blocks):
                 self.offloader_double.wait_for_block(block_idx)
-                img, txt = block(img=img, txt=txt, vec=vec, pe=pe)
+                current['layer'] = i
+                img, txt = block(img=img, txt=txt, vec=vec, pe=pe, cache_dic=cache_dic, current=current)
                 self.offloader_double.submit_move_blocks(self.double_blocks, block_idx)
 
             img = torch.cat((txt, img), 1)
+            if cache_dic['Delta-DiT']:
+                delta_base = img
 
             for block_idx, block in enumerate(self.single_blocks):
                 self.offloader_single.wait_for_block(block_idx)
-                img = block(img, vec=vec, pe=pe)
+                current['layer'] = i
+                img = block(img, vec=vec, pe=pe, cache_dic=cache_dic, current=current)
                 self.offloader_single.submit_move_blocks(self.single_blocks, block_idx)
+        
+        if cache_dic['Delta-DiT']:
+            if current['type'] == 'Delta-Cache':
+                img = delta_base + cache_dic['Delta-Cache']
+            else:
+                cache_dic['Delta-Cache'] = img - delta_base
+        
         img = img[:, txt.shape[1] :, ...]
         end_event.record()
         torch.cuda.synchronize()

@@ -27,6 +27,10 @@ from einops import rearrange
 from liger_kernel.ops.rms_norm import LigerRMSNormFunction
 from torch import Tensor, nn
 from torch.utils.checkpoint import checkpoint
+from cache_functions import taylor_formula, derivative_approximation, taylor_cache_init, \
+    force_init, cache_cutfresh, update_cache
+
+
 import logging
 logger = logging.getLogger(__name__)
 
@@ -526,7 +530,14 @@ class Modulation(nn.Module):
 
 class DoubleStreamBlock(nn.Module):
     def __init__(
-        self, hidden_size: int, num_heads: int, mlp_ratio: float, qkv_bias: bool = False, mode: str = "flash"
+        self, 
+        hidden_size: int, 
+        num_heads: int, 
+        mlp_ratio: float, 
+        qkv_bias: bool = False, 
+        mode: str = "flash",
+        cache_dic: dict = None,
+        current: int = None,
     ):
         super().__init__()
 
@@ -563,6 +574,7 @@ class DoubleStreamBlock(nn.Module):
         self.gradient_checkpointing = False
         self.cpu_offload_checkpointing = False
 
+
     def enable_gradient_checkpointing(self, cpu_offload: bool = False):
         self.gradient_checkpointing = True
         self.cpu_offload_checkpointing = cpu_offload
@@ -572,54 +584,217 @@ class DoubleStreamBlock(nn.Module):
         self.cpu_offload_checkpointing = False
 
     def _forward(
-        self, img: Tensor, txt: Tensor, vec: Tensor, pe: Tensor
+        self, img: Tensor, txt: Tensor, vec: Tensor, pe: Tensor, **kwargs
     ) -> tuple[Tensor, Tensor]:
-        img_mod1, img_mod2 = self.img_mod(vec)
-        txt_mod1, txt_mod2 = self.txt_mod(vec)
+        
+        cache_dic = kwargs.get('cache_dic', None)
+        current = kwargs.get('current', None)      
+        
+        if cache_dic is not None:
+            img_mod1, img_mod2 = self.img_mod(vec)
+            txt_mod1, txt_mod2 = self.txt_mod(vec)
 
-        # prepare image for attention
-        img_modulated = self.img_norm1(img)
-        img_modulated = (1 + img_mod1.scale) * img_modulated + img_mod1.shift
-        img_qkv = self.img_attn.qkv(img_modulated)
-        img_q, img_k, img_v = rearrange(
-            img_qkv, "B L (K H D) -> K B L H D", K=3, H=self.num_heads
-        )
-        img_q, img_k = self.img_attn.norm(img_q, img_k, img_v)
+            # prepare image for attention
+            img_modulated = self.img_norm1(img)
+            img_modulated = (1 + img_mod1.scale) * img_modulated + img_mod1.shift
+            img_qkv = self.img_attn.qkv(img_modulated)
+            img_q, img_k, img_v = rearrange(
+                img_qkv, "B L (K H D) -> K B L H D", K=3, H=self.num_heads
+            )
+            img_q, img_k = self.img_attn.norm(img_q, img_k, img_v)
 
-        # prepare txt for attention
-        txt_modulated = self.txt_norm1(txt)
-        txt_modulated = (1 + txt_mod1.scale) * txt_modulated + txt_mod1.shift
-        txt_qkv = self.txt_attn.qkv(txt_modulated)
-        txt_q, txt_k, txt_v = rearrange(
-            txt_qkv, "B L (K H D) -> K B L H D", K=3, H=self.num_heads
-        )
-        txt_q, txt_k = self.txt_attn.norm(txt_q, txt_k, txt_v)
+            # prepare txt for attention
+            txt_modulated = self.txt_norm1(txt)
+            txt_modulated = (1 + txt_mod1.scale) * txt_modulated + txt_mod1.shift
+            txt_qkv = self.txt_attn.qkv(txt_modulated)
+            txt_q, txt_k, txt_v = rearrange(
+                txt_qkv, "B L (K H D) -> K B L H D", K=3, H=self.num_heads
+            )
+            txt_q, txt_k = self.txt_attn.norm(txt_q, txt_k, txt_v)
 
-        # run actual attention
-        q = torch.cat((txt_q, img_q), dim=1)
-        k = torch.cat((txt_k, img_k), dim=1)
-        v = torch.cat((txt_v, img_v), dim=1)
+            # run actual attention
+            q = torch.cat((txt_q, img_q), dim=1)
+            k = torch.cat((txt_k, img_k), dim=1)
+            v = torch.cat((txt_v, img_v), dim=1)
 
-        attn = attention_after_rope(q, k, v, pe, self.mode)
-        txt_attn, img_attn = attn[:, : txt.shape[1]], attn[:, txt.shape[1] :]
+            attn = attention_after_rope(q, k, v, pe, self.mode)
+            txt_attn, img_attn = attn[:, : txt.shape[1]], attn[:, txt.shape[1] :]
 
-        # calculate the img bloks
-        img = img + img_mod1.gate * self.img_attn.proj(img_attn)
-        img_mlp = self.img_mlp(
-            (1 + img_mod2.scale) * self.img_norm2(img) + img_mod2.shift
-        )
-        img = scale_add_residual(img_mlp, img_mod2.gate, img)
+            # calculate the img bloks
+            img = img + img_mod1.gate * self.img_attn.proj(img_attn)
+            img_mlp = self.img_mlp(
+                (1 + img_mod2.scale) * self.img_norm2(img) + img_mod2.shift
+            )
+            img = scale_add_residual(img_mlp, img_mod2.gate, img)
 
-        # calculate the txt bloks
-        txt = txt + txt_mod1.gate * self.txt_attn.proj(txt_attn)
-        txt_mlp = self.txt_mlp(
-            (1 + txt_mod2.scale) * self.txt_norm2(txt) + txt_mod2.shift
-        )
-        txt = scale_add_residual(txt_mlp, txt_mod2.gate, txt)
+            # calculate the txt bloks
+            txt = txt + txt_mod1.gate * self.txt_attn.proj(txt_attn)
+            txt_mlp = self.txt_mlp(
+                (1 + txt_mod2.scale) * self.txt_norm2(txt) + txt_mod2.shift
+            )
+            txt = scale_add_residual(txt_mlp, txt_mod2.gate, txt)
+        else:
+            current['stream'] = 'double_stream'
+
+            if (current['type'] == 'full') or (current['type'] == 'Delta-Cache'):    
+                img_mod1, img_mod2 = self.img_mod(vec)
+                txt_mod1, txt_mod2 = self.txt_mod(vec)
+
+                current['module'] = 'attn'
+                
+                taylor_cache_init(cache_dic=cache_dic, current=current)
+                # prepare image for attention
+                img_modulated = self.img_norm1(img)
+                img_modulated = (1 + img_mod1.scale) * img_modulated + img_mod1.shift
+                img_qkv = self.img_attn.qkv(img_modulated)
+                img_q, img_k, img_v = rearrange(img_qkv, "B L (K H D) -> K B H L D", K=3, H=self.num_heads)
+                
+                if cache_dic['cache_type'] == 'k-norm':
+                    img_k_norm = img_k.norm(dim=-1, p=2).mean(dim=1)
+                    cache_dic['k-norm'][-1][current['stream']][current['layer']]['img_mlp'] = img_k_norm
+                elif cache_dic['cache_type'] == 'v-norm':
+                    img_v_norm = img_v.norm(dim=-1, p=2).mean(dim=1)
+                    cache_dic['v-norm'][-1][current['stream']][current['layer']]['img_mlp'] = img_v_norm
+                
+                img_q, img_k = self.img_attn.norm(img_q, img_k, img_v)
+
+                # prepare txt for attention
+                txt_modulated = self.txt_norm1(txt)
+                txt_modulated = (1 + txt_mod1.scale) * txt_modulated + txt_mod1.shift
+                txt_qkv = self.txt_attn.qkv(txt_modulated)
+                txt_q, txt_k, txt_v = rearrange(txt_qkv, "B L (K H D) -> K B H L D", K=3, H=self.num_heads)
+
+                if cache_dic['cache_type'] == 'k-norm':
+                    txt_k_norm = txt_k.norm(dim=-1, p=2).mean(dim=1)
+                    cache_dic['k-norm'][-1][current['stream']][current['layer']]['txt_mlp'] = txt_k_norm
+                elif cache_dic['cache_type'] == 'v-norm':
+                    txt_v_norm = txt_v.norm(dim=-1, p=2).mean(dim=1)
+                    cache_dic['v-norm'][-1][current['stream']][current['layer']]['txt_mlp'] = txt_v_norm
+                
+                txt_q, txt_k = self.txt_attn.norm(txt_q, txt_k, txt_v)
+
+                # run actual attention
+                q = torch.cat((txt_q, img_q), dim=2)
+                k = torch.cat((txt_k, img_k), dim=2)
+                v = torch.cat((txt_v, img_v), dim=2)
+
+                attn = attention(q, k, v, pe=pe, cache_dic=cache_dic, current=current)
+                #cache_dic['cache'][-1]['double_stream'][current['layer']]['attn'] = attn
+                #derivative_approximation(cache_dic=cache_dic, current=current, feature=attn)
+
+                txt_attn, img_attn = attn[:, : txt.shape[1]], attn[:, txt.shape[1] :]
+                cache_dic['txt_shape'] = txt.shape[1]
+                
+                if cache_dic['cache_type'] == 'attention':
+                    cache_dic['attn_map'][-1][current['stream']][current['layer']]['txt_mlp'] = cache_dic['attn_map'][-1][current['stream']][current['layer']]['total'][:, : txt.shape[1]]
+                    cache_dic['attn_map'][-1][current['stream']][current['layer']]['img_mlp'] = cache_dic['attn_map'][-1][current['stream']][current['layer']]['total'][:, txt.shape[1] :]
+
+                # calculate the img bloks
+                current['module'] = 'img_attn'
+                force_init(cache_dic=cache_dic, current=current, tokens=img)
+                taylor_cache_init(cache_dic=cache_dic, current=current)
+                img_attn_out = self.img_attn.proj(img_attn)
+                derivative_approximation(cache_dic=cache_dic, current=current, feature=img_attn_out)
+                img = img + img_mod1.gate * img_attn_out
+                
+                current['module'] = 'img_mlp'
+                force_init(cache_dic=cache_dic, current=current, tokens=img)
+                taylor_cache_init(cache_dic=cache_dic, current=current)
+                #cache_dic['cache'][-1]['double_stream'][current['layer']]['img_mlp'] = self.img_mlp((1 + img_mod2.scale) * self.img_norm2(img) + img_mod2.shift)
+                img_mlp_out = self.img_mlp((1 + img_mod2.scale) * self.img_norm2(img) + img_mod2.shift)
+                derivative_approximation(cache_dic=cache_dic, current=current, feature=img_mlp_out)
+                img = img + img_mod2.gate * img_mlp_out
+                #cache_dic['cache'][-1]['double_stream'][current['layer']]['img_mod2'] = img_mod2
+                
+
+                # calculate the txt bloks
+                current['module'] = 'txt_attn'
+                force_init(cache_dic=cache_dic, current=current, tokens=img)
+                taylor_cache_init(cache_dic=cache_dic, current=current)
+                txt_attn_out = self.txt_attn.proj(txt_attn)
+                derivative_approximation(cache_dic=cache_dic, current=current, feature=txt_attn_out)
+                txt = txt + txt_mod1.gate * txt_attn_out
+
+                current['module'] = 'txt_mlp'
+                force_init(cache_dic=cache_dic, current=current, tokens=txt)
+                taylor_cache_init(cache_dic=cache_dic, current=current)
+                #cache_dic['cache'][-1]['double_stream'][current['layer']]['txt_mlp'] = self.txt_mlp((1 + txt_mod2.scale) * self.txt_norm2(txt) + txt_mod2.shift)
+                txt_mlp_out = self.txt_mlp((1 + txt_mod2.scale) * self.txt_norm2(txt) + txt_mod2.shift)
+                derivative_approximation(cache_dic=cache_dic, current=current, feature=txt_mlp_out)
+                txt = txt + txt_mod2.gate * txt_mlp_out
+                #txt = txt + txt_mod2.gate * cache_dic['cache'][-1]['double_stream'][current['layer']]['txt_mlp']
+                #cache_dic['cache'][-1]['double_stream'][current['layer']]['txt_mod2'] = txt_mod2
+
+            elif current['type'] == 'ToCa':
+                img_mod1, img_mod2 = self.img_mod(vec)
+                txt_mod1, txt_mod2 = self.txt_mod(vec)
+
+                current['module'] = 'attn'
+                # Just a symbolic name
+
+                # calculate the img bloks
+                current['module'] = 'img_attn'
+
+                img = img + img_mod1.gate * taylor_formula(cache_dic=cache_dic, current=current)
+                
+                current['module'] = 'img_mlp'
+
+                fresh_indices, fresh_tokens_img = cache_cutfresh(cache_dic=cache_dic, tokens=img, current=current)
+                fresh_tokens_img = self.img_mlp((1 + img_mod2.scale) * self.img_norm2(fresh_tokens_img) + img_mod2.shift)
+                update_cache(fresh_indices=fresh_indices, fresh_tokens=fresh_tokens_img, cache_dic=cache_dic, current=current)
+                img = img + img_mod2.gate * taylor_formula(cache_dic=cache_dic, current=current)
+
+                # calculate the txt bloks
+                current['module'] = 'txt_attn'
+
+                txt = txt + txt_mod1.gate * taylor_formula(cache_dic=cache_dic, current=current)
+                
+                current['module'] = 'txt_mlp'
+                
+                fresh_indices, fresh_tokens_txt = cache_cutfresh(cache_dic=cache_dic, tokens=txt, current=current)
+                fresh_tokens_txt = self.txt_mlp((1 + txt_mod2.scale) * self.txt_norm2(fresh_tokens_txt) + txt_mod2.shift)
+                update_cache(fresh_indices=fresh_indices, fresh_tokens=fresh_tokens_txt, cache_dic=cache_dic, current=current)
+
+                txt = txt + txt_mod2.gate * taylor_formula(cache_dic=cache_dic, current=current)
+            
+            elif current['type'] == 'FORA':
+                img_mod1, img_mod2 = self.img_mod(vec)
+                txt_mod1, txt_mod2 = self.txt_mod(vec)
+                
+                img = img + img_mod1.gate * cache_dic['cache'][-1]['double_stream'][current['layer']]['img_attn'][0]
+                txt = txt + txt_mod1.gate * cache_dic['cache'][-1]['double_stream'][current['layer']]['txt_attn'][0]
+                img = img + img_mod2.gate * cache_dic['cache'][-1]['double_stream'][current['layer']]['img_mlp'][0]
+                txt = txt + txt_mod2.gate * cache_dic['cache'][-1]['double_stream'][current['layer']]['txt_mlp'][0]
+            
+            elif current['type'] == 'taylor_cache':
+                img_mod1, img_mod2 = self.img_mod(vec)
+                txt_mod1, txt_mod2 = self.txt_mod(vec)
+
+                current['module'] = 'attn'
+
+                # caculate the img bloks
+                current['module'] = 'img_attn'
+                img = img + img_mod1.gate * taylor_formula(cache_dic=cache_dic, current=current)
+
+                current['module'] = 'img_mlp'
+                img = img + img_mod2.gate * taylor_formula(cache_dic=cache_dic, current=current)
+                
+                # caculate the txt bloks
+                current['module'] = 'txt_attn'
+                txt = txt + txt_mod1.gate * taylor_formula(cache_dic=cache_dic, current=current)
+
+                current['module'] = 'txt_mlp'
+                txt = txt + txt_mod2.gate * taylor_formula(cache_dic=cache_dic, current=current)
+
+
+            elif current['type'] == 'aggressive':
+                current['module'] = 'skipped'
+            else:
+                raise ValueError("Unknown cache type.")
         return img, txt
 
     def forward(
-        self, img: Tensor, txt: Tensor, vec: Tensor, pe: Tensor
+        self, img: Tensor, txt: Tensor, vec: Tensor, pe: Tensor, **kwargs
     ) -> tuple[Tensor, Tensor]:
         if self.training and self.gradient_checkpointing:
             if not self.cpu_offload_checkpointing:
@@ -639,7 +814,7 @@ class DoubleStreamBlock(nn.Module):
             )
 
         else:
-            return self._forward(img, txt, vec, pe)
+            return self._forward(img, txt, vec, pe, **kwargs)
 
 class SingleStreamBlock(nn.Module):
     """
@@ -687,23 +862,107 @@ class SingleStreamBlock(nn.Module):
         self.gradient_checkpointing = False
         self.cpu_offload_checkpointing = False
 
-    def _forward(self, x: Tensor, vec: Tensor, pe: Tensor) -> Tensor:
+    def _forward(self, x: Tensor, vec: Tensor, pe: Tensor, **kwargs) -> Tensor:
+        cache_dic = kwargs.get('cache_dic', None)
+        current = kwargs.get('current', None)
+
         mod, _ = self.modulation(vec)
-        x_mod = (1 + mod.scale) * self.pre_norm(x) + mod.shift
-        qkv, mlp = torch.split(
-            self.linear1(x_mod), [3 * self.hidden_size, self.mlp_hidden_dim], dim=-1
-        )
 
-        q, k, v = rearrange(qkv, "B L (K H D) -> K B L H D", K=3, H=self.num_heads)
-        q, k = self.norm(q, k, v)
+        if cache_dic is None:
+            x_mod = (1 + mod.scale) * self.pre_norm(x) + mod.shift
+            qkv, mlp = torch.split(
+                self.linear1(x_mod), [3 * self.hidden_size, self.mlp_hidden_dim], dim=-1
+            )
 
-        # compute attention
-        attn = attention_after_rope(q, k, v, pe, self.mode)
-        # compute activation in mlp stream, cat again and run second linear layer
-        output = self.linear2(torch.cat((attn, self.mlp_act(mlp)), 2))
-        return scale_add_residual(output, mod.gate, x)
+            q, k, v = rearrange(qkv, "B L (K H D) -> K B L H D", K=3, H=self.num_heads)
+            q, k = self.norm(q, k, v)
+
+            # compute attention
+            attn = attention_after_rope(q, k, v, pe, self.mode)
+            # compute activation in mlp stream, cat again and run second linear layer
+            output = self.linear2(torch.cat((attn, self.mlp_act(mlp)), 2))
+        else:
+            current['stream'] = 'single_stream'
+
+            if current['type'] == 'full':
+                #if (current['layer'] == 0):
+                #    print(current['step'])
+
+                #cache_dic['cache'][-1]['single_stream'][current['layer']]['mod'] = mod
+
+                x_mod = (1 + mod.scale) * self.pre_norm(x) + mod.shift
+                current['module'] = 'mlp'
+                qkv, mlp = torch.split(self.linear1(x_mod), [3 * self.hidden_size, self.mlp_hidden_dim], dim=-1)
+                force_init(cache_dic=cache_dic, current=current, tokens=mlp)
+                current['module'] = 'attn'
+                taylor_cache_init(cache_dic=cache_dic, current=current)
+                q, k, v = rearrange(qkv, "B L (K H D) -> K B H L D", K=3, H=self.num_heads)
+
+                if cache_dic['cache_type'] == 'k-norm':
+                    cache_dic['k-norm'][-1][current['stream']][current['layer']]['total'] = k.norm(dim=-1, p=2).mean(dim=1)
+                elif cache_dic['cache_type'] == 'v-norm':
+                    cache_dic['v-norm'][-1][current['stream']][current['layer']]['total'] = v.norm(dim=-1, p=2).mean(dim=1)
+                
+                q, k = self.norm(q, k, v)
+
+                # compute attention
+                attn = attention(q, k, v, pe=pe, cache_dic=cache_dic, current=current)
+                force_init(cache_dic=cache_dic, current=current, tokens=attn)
+
+                cache_dic['cache'][-1]['single_stream'][current['layer']]['attn'] = attn
+                # compute activation in mlp stream, cat again and run second linear layer
+                current['module'] = 'total'
+                taylor_cache_init(cache_dic=cache_dic, current=current)
+                output = self.linear2(torch.cat((attn, self.mlp_act(mlp)), 2))
+                force_init(cache_dic=cache_dic, current=current, tokens=output)
+                derivative_approximation(cache_dic=cache_dic, current=current, feature=output)
+
+            elif current['type'] == 'ToCa':
+
+                #mod = cache_dic['cache'][-1]['single_stream'][current['layer']]['mod']
+
+                self.load_mlp_in_weights(self.linear1.weight, self.linear1.bias)
+                current['module'] = 'mlp'
+                fresh_indices, fresh_tokens_mlp = cache_cutfresh(cache_dic=cache_dic, tokens=x, current=current)
+                x_mod = (1 + mod.scale) * self.pre_norm(fresh_tokens_mlp) + mod.shift
+                #cache_dic['cache'][-1]['single_stream'][current['layer']]['mlp']
+                mlp_fresh = self.mlp_in(x_mod)
+                #_, mlp_fresh1 = torch.split(self.linear1(x_mod), [3 * self.hidden_size, self.mlp_hidden_dim], dim=-1)
+                # compute attention
+                current['module'] = 'attn'
+                attn_cache = taylor_formula(cache_dic, current).unsqueeze(0)
+                fake_fresh_attn = torch.gather(input = attn_cache, dim = 1, 
+                                               index = fresh_indices.unsqueeze(-1).expand(-1, -1, attn_cache.shape[-1]))
+                
+                current['module'] = 'total'
+                fresh_tokens_output = self.linear2(torch.cat((fake_fresh_attn, self.mlp_act(mlp_fresh)), 2))
+                update_cache(fresh_indices=fresh_indices, fresh_tokens=fresh_tokens_output, cache_dic=cache_dic, current=current)
+                output = taylor_formula(cache_dic=cache_dic, current=current)
+            
+            elif current['type'] == 'FORA':
+                output = cache_dic['cache'][-1]['single_stream'][current['layer']]['total'][0]
+            
+            elif current['type'] == 'taylor_cache':
+                current['module'] = 'total'
+                output = taylor_formula(cache_dic=cache_dic, current=current)
+
+            elif current['type'] == 'aggressive':
+                current['module'] = 'skipped'
+                if current['layer'] == 37:
+                    x = cache_dic['cache'][-1]['aggressive_output']
+                return x
+            elif current['type'] == 'Delta-Cache':
+                current['module'] = 'total'
+                output = 0
+            else:
+                raise ValueError("Unknown cache type.")
+            
+            if current['layer'] == 37:
+                cache_dic['cache'][-1]['aggressive_output'] = x
+            
+        return x + mod.gate * output
     
-    def forward(self, x: Tensor, vec: Tensor, pe: Tensor) -> Tensor:
+    def forward(self, x: Tensor, vec: Tensor, pe: Tensor, **kwargs) -> Tensor:
         if self.training and self.gradient_checkpointing:
             if not self.cpu_offload_checkpointing:
                 return checkpoint(self._forward, x, vec, pe, use_reentrant=False)
@@ -722,7 +981,7 @@ class SingleStreamBlock(nn.Module):
                 create_custom_forward(self._forward), x, vec, pe, use_reentrant=False
             )
         else:
-            return self._forward(x, vec, pe)
+            return self._forward(x, vec, pe, **kwargs)
 
 class LastLayer(nn.Module):
     def __init__(self, hidden_size: int, patch_size: int, out_channels: int):

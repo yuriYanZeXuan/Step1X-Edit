@@ -22,6 +22,9 @@ from modules.conditioner import Qwen25VL_7b_Embedder as Qwen2VLEmbedder
 from modules.model_edit import Step1XParams, Step1XEdit
 from modules.multigpu import parallel_transformer, teacache_transformer, parallel_teacache_transformer
 
+# 导入cache
+from modules.cache_functions import cache_init
+
 from torch import Tensor
 import torch.distributed as dist
 from xfuser.core.distributed import (
@@ -197,12 +200,13 @@ class ImageGenerator:
         self.mode = mode
         self.use_taylor_series = kwargs.get("use_taylor_series", False)
         if self.use_taylor_series:
-            self.taylor_series_order = kwargs.get("taylor_series_order", 1)
-            self.taylor_series_step = kwargs.get("taylor_series_step", 1)
-            self.taylor_series_epsilon = kwargs.get("taylor_series_epsilon", 1e-4)
-            self.taylor_series_max_iter = kwargs.get("taylor_series_max_iter", 10)
-            self.taylor_series_tol = kwargs.get("taylor_series_tol", 1e-6)
-            self.taylor_series_device = kwargs.get("taylor_series_device", "cuda")
+            pass
+            # self.taylor_series_order = kwargs.get("taylor_series_order", 1)
+            # self.taylor_series_step = kwargs.get("taylor_series_step", 1)
+            # self.taylor_series_epsilon = kwargs.get("taylor_series_epsilon", 1e-4)
+            # self.taylor_series_max_iter = kwargs.get("taylor_series_max_iter", 10)
+            # self.taylor_series_tol = kwargs.get("taylor_series_tol", 1e-6)
+            # self.taylor_series_device = kwargs.get("taylor_series_device", "cuda")
 
 
     def prepare(self, prompt, img, ref_image, ref_image_raw):
@@ -378,6 +382,11 @@ class ImageGenerator:
         show_progress=False,
         timesteps_truncate=0.93,
     ):
+        # init cache
+        cache_dic, current = cache_init(timesteps)
+        current['step']=0
+        current['num_steps'] = len(timesteps)-1
+        
         ref_img_tensor = img[0, img.shape[1] // 2:].clone()
         if self.offload:
             self.dit = self.dit.to(self.device)
@@ -391,6 +400,7 @@ class ImageGenerator:
             t_vec = torch.full(
                 (img.shape[0],), t_curr, dtype=img.dtype, device=img.device
             )
+            current['t'] = t_curr
             pred = self.dit(
                 img=img,
                 img_ids=img_ids,
@@ -399,7 +409,10 @@ class ImageGenerator:
                 llm_embedding=llm_embedding,
                 t_vec=t_vec,
                 mask=mask,
+                cache_dic=cache_dic,
+                current=current,
             )
+            current['step'] += 1
             pred = pred[:, :pred.shape[1] // 2]
 
             if cfg_guidance != -1:
