@@ -81,6 +81,20 @@ OVIS_GENERATION_CONFIG = {
     "max_new_tokens": 1024,
 }
 
+# stepedit 特定生成参数
+STEPEDIT_GENERATION_CONFIG = {
+    "steps": 28,
+    
+    "use_teacache": True,
+    "teacache_threshold": 0.2,
+    "ring_degree": 1,
+    "ulysses_degree": 1,
+    "cfg_degree": 1,
+    
+    "use_cache": False,
+    "use_taylor_series": False,
+}
+
 # 结果目录配置
 RESULTS_CONFIG = {
     "results_dir": "results",
@@ -156,12 +170,13 @@ def get_generation_config(model_type: str) -> dict[str, Any]:
 
     Returns:
         生成配置字典
-
     """
     if model_type == "icedit":
         return {**GENERATION_CONFIG, **ICEDIT_GENERATION_CONFIG}
     if model_type == "ovis":
         return {**GENERATION_CONFIG, **OVIS_GENERATION_CONFIG}
+    if model_type == "stepedit":
+        return {**GENERATION_CONFIG, **STEPEDIT_GENERATION_CONFIG}
     return GENERATION_CONFIG
 
 

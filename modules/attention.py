@@ -51,6 +51,7 @@ def attention(
     drop_rate=0,
     attn_mask=None,
     causal=False,
+    **kwargs
 ):
     """
     执行QKV自注意力计算
@@ -74,7 +75,10 @@ def attention(
     q = pre_attn_layout(q)  # 形状根据模式变化
     k = pre_attn_layout(k)
     v = pre_attn_layout(v)
-
+    cache_dic = kwargs.get('cache_dic', None)
+    current = kwargs.get('current', None)     
+    if cache_dic is not None and cache_dic['cache_type'] == 'attention':
+        mode = 'vanilla'
     if mode == "torch":
         # 使用PyTorch原生的scaled_dot_product_attention
         if attn_mask is not None and attn_mask.dtype != torch.bool:
@@ -122,7 +126,9 @@ def attention(
         # softmax和dropout
         attn = attn.softmax(dim=-1)
         attn = torch.dropout(attn, p=drop_rate, train=True)
-
+        # 存储注意力矩阵
+        if cache_dic is not None and cache_dic['cache_type'] == 'attention':
+            cache_dic['attn_map'][-1][current['stream']][current['layer']]['total'] = attn
         # 计算输出
         x = attn @ v  # [B,A,S,D]
     elif mode == "xdit":

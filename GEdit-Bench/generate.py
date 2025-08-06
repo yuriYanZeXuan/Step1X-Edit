@@ -294,7 +294,8 @@ class BaseGenerator(ABC):
             raise
         except Exception as e:
             logger.error(f"生成图像 {key} 时出错: {e!s}")
-            return None
+            raise
+            # return None
 
     def generate_all_images(
         self,
@@ -696,6 +697,11 @@ class StepEditGenerator(BaseGenerator):
         qwen2vl_model_path = model_config.get("qwen2vl_model_path", "/root/autodl-tmp/weights/qwen2.5vl")
         version = model_config.get("version", "v1.0")
         logger.info(f"model_config:{model_config}")
+        
+        # gen_config用于设置cache相关参数
+        gen_config = self.config.get("generation_config", {})
+        logger.info(f"gen_config:{gen_config}")
+        
         size_level = self.config.get("size_level", 512)
         quantized = self.config.get("quantized", False)
         offload = self.config.get("offload", False)
@@ -719,7 +725,19 @@ class StepEditGenerator(BaseGenerator):
             offload=offload,
             mode="flash",
             version=version,
+            **gen_config
         )
+        if "use_teacache" in gen_config: 
+            self.pipe.dit.__class__.enable_teacache = True
+            self.pipe.dit.__class__.cnt = 0
+            self.pipe.dit.__class__.num_steps = gen_config.get("steps", 28)
+            self.pipe.dit.__class__.rel_l1_thresh = gen_config.get("teacache_threshold", 0.2)
+            self.pipe.dit.__class__.accumulated_rel_l1_distance = 0
+            self.pipe.dit.__class__.previous_modulated_input = None
+            self.pipe.dit.__class__.previous_residual = None
+            from modules.multigpu import teacache_transformer
+            teacache_transformer(self.pipe)
+            logger.info("teacache_transformer完成")
 
     def _generate_image(
         self,
@@ -787,7 +805,8 @@ class StepEditGenerator(BaseGenerator):
             return images[0]
         except Exception as e:
             logger.error(f"StepEdit生成图像失败: {e}")
-            return None
+            raise
+            # return None
 
 
 class ParallelGenerator:

@@ -193,7 +193,7 @@ User Prompt:'''
             outputs = self.model(input_ids = inputs.input_ids, attention_mask = inputs.attention_mask, pixel_values = inputs.pixel_values.to("cuda"), image_grid_thw = inputs.image_grid_thw.to("cuda"), output_hidden_states=True)
             end_event.record()
             torch.cuda.synchronize()
-            logger.info(f"model函数运行时间: {start_event.elapsed_time(end_event)} ms")
+            logger.info(f"VLM函数运行时间: {start_event.elapsed_time(end_event)} ms")
             
             # outputs = self.model.base_model(input_ids = inputs.input_ids, attention_mask = inputs.attention_mask, pixel_values = inputs.pixel_values.to("cuda"), image_grid_thw = inputs.image_grid_thw.to("cuda"), output_hidden_states=True)
 

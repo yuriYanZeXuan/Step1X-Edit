@@ -21,6 +21,9 @@ from modules.autoencoder import AutoEncoder
 from modules.conditioner import Qwen25VL_7b_Embedder as Qwen2VLEmbedder
 from modules.model_edit import Step1XParams, Step1XEdit
 from modules.multigpu import parallel_transformer, teacache_transformer, parallel_teacache_transformer
+import logging
+
+logger = logging.getLogger(__name__)
 
 # 导入cache
 from modules.cache_functions import cache_init
@@ -177,7 +180,10 @@ class ImageGenerator:
             mode=mode,
             version=version,
         )
-        
+        # 将dit网络结构打印到文本文件中
+        # with open("dit_structure.txt", "w", encoding="utf-8") as f:
+        #     f.write(str(self.dit))
+            
         if not quantized:
             self.dit = self.dit.to(dtype=torch.bfloat16)
         else:
@@ -198,15 +204,9 @@ class ImageGenerator:
         else:
             self.lora_module = None
         self.mode = mode
+        self.use_cache = kwargs.get("use_cache", True)
         self.use_taylor_series = kwargs.get("use_taylor_series", False)
-        if self.use_taylor_series:
-            pass
-            # self.taylor_series_order = kwargs.get("taylor_series_order", 1)
-            # self.taylor_series_step = kwargs.get("taylor_series_step", 1)
-            # self.taylor_series_epsilon = kwargs.get("taylor_series_epsilon", 1e-4)
-            # self.taylor_series_max_iter = kwargs.get("taylor_series_max_iter", 10)
-            # self.taylor_series_tol = kwargs.get("taylor_series_tol", 1e-6)
-            # self.taylor_series_device = kwargs.get("taylor_series_device", "cuda")
+        self.use_teacache = kwargs.get("use_teacache", False)
 
 
     def prepare(self, prompt, img, ref_image, ref_image_raw):
@@ -401,17 +401,28 @@ class ImageGenerator:
                 (img.shape[0],), t_curr, dtype=img.dtype, device=img.device
             )
             current['t'] = t_curr
-            pred = self.dit(
-                img=img,
-                img_ids=img_ids,
-                txt_ids=txt_ids,
-                timesteps=t_vec,
-                llm_embedding=llm_embedding,
-                t_vec=t_vec,
-                mask=mask,
-                cache_dic=cache_dic,
-                current=current,
-            )
+            if self.use_cache:
+                pred = self.dit(
+                    img=img,
+                    img_ids=img_ids,
+                    txt_ids=txt_ids,
+                    timesteps=t_vec,
+                    llm_embedding=llm_embedding,
+                    t_vec=t_vec,
+                    mask=mask,
+                    cache_dic=cache_dic,
+                    current=current,
+                )
+            else:   
+                pred = self.dit(
+                    img=img,
+                    img_ids=img_ids,
+                    txt_ids=txt_ids,
+                    timesteps=t_vec,
+                    llm_embedding=llm_embedding,
+                    t_vec=t_vec,
+                    mask=mask,
+                )
             current['step'] += 1
             pred = pred[:, :pred.shape[1] // 2]
 

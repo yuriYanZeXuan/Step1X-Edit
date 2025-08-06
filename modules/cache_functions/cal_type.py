@@ -4,6 +4,9 @@ def cal_type(cache_dic, current):
     '''
     Determine calculation type for this step
     '''
+    if cache_dic is None or current is None:
+        return
+    
     if (cache_dic['fresh_ratio'] == 0.0) and (not cache_dic['taylor_cache']):
         # FORA:Uniform
         first_step = (current['step'] == 0)

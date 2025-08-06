@@ -5,11 +5,11 @@ import numpy as np
 import torch
 
 from library import custom_offloading_utils
-
 from torch import Tensor, nn
-
+from .cache_functions import cal_type
 from .connector_edit import Qwen2Connector
 from .layers import DoubleStreamBlock, EmbedND, LastLayer, MLPEmbedder, SingleStreamBlock
+
 logger = logging.getLogger(__name__)
 
 @dataclass
@@ -280,6 +280,81 @@ class Step1XEdit(nn.Module):
             embedding = embedding.to(t)
         return embedding
 
+    def forward_backup(
+        self,
+        img: Tensor,
+        img_ids: Tensor,
+        txt_ids: Tensor,
+        timesteps: Tensor,
+        llm_embedding: Tensor,
+        t_vec: Tensor,
+        mask: Tensor,
+    ) -> Tensor:
+        
+        # 使用CUDA统计model函数的运行时间并用logger打印
+        torch.cuda.synchronize()
+        start_event = torch.cuda.Event(enable_timing=True)
+        end_event = torch.cuda.Event(enable_timing=True)
+        start_event.record()
+        txt, y = self.connector(
+            llm_embedding, t_vec, mask
+        )
+        end_event.record()
+        torch.cuda.synchronize()
+        logger.info(f"connector函数运行时间: {start_event.elapsed_time(end_event)} ms")
+        
+        if img.ndim != 3 or txt.ndim != 3:
+            raise ValueError("Input img and txt tensors must have 3 dimensions.")
+
+        img = self.img_in(img)
+        vec = self.time_in(self.timestep_embedding(timesteps, 256))
+
+        vec = vec + self.vector_in(y)
+        txt = self.txt_in(txt)
+        ids = torch.cat((txt_ids, img_ids), dim=1)
+        pe = self.pe_embedder(ids)
+        
+        
+        # 使用CUDA统计model函数的运行时间并用logger打印
+        torch.cuda.synchronize()
+        start_event = torch.cuda.Event(enable_timing=True)
+        end_event = torch.cuda.Event(enable_timing=True)
+        start_event.record()
+        if not self.blocks_to_swap:
+            logger.info(f"not self.blocks_to_swap")
+            for i, block in enumerate(self.double_blocks):
+                img, txt = block(img=img, txt=txt, vec=vec, pe=pe)
+
+            img = torch.cat((txt, img), 1)
+            
+            for i, block in enumerate(self.single_blocks):
+                img = block(img, vec=vec, pe=pe)
+        else:
+            logger.info(f"self.blocks_to_swap")
+            for block_idx, block in enumerate(self.double_blocks):
+                self.offloader_double.wait_for_block(block_idx)
+                img, txt = block(img=img, txt=txt, vec=vec, pe=pe)
+                self.offloader_double.submit_move_blocks(self.double_blocks, block_idx)
+
+            img = torch.cat((txt, img), 1)
+
+            for block_idx, block in enumerate(self.single_blocks):
+                self.offloader_single.wait_for_block(block_idx)
+                img = block(img, vec=vec, pe=pe)
+                self.offloader_single.submit_move_blocks(self.single_blocks, block_idx)
+        
+        img = img[:, txt.shape[1] :, ...]
+        end_event.record()
+        torch.cuda.synchronize()
+        logger.info(f"model函数运行时间: {start_event.elapsed_time(end_event)} ms")
+
+        if self.training and self.cpu_offload_checkpointing:
+            img = img.to(self.device)
+            vec = vec.to(self.device)
+
+        img = self.final_layer(img, vec)  # (N, T, patch_size ** 2 * out_channels)
+        return img
+    
     def forward(
         self,
         img: Tensor,
@@ -294,6 +369,8 @@ class Step1XEdit(nn.Module):
         
         cache_dic = kwargs.get('cache_dic', None)
         current = kwargs.get('current', None)
+        if current is None or cache_dic is None:
+            return self.forward_backup(img, img_ids, txt_ids, timesteps, llm_embedding, t_vec, mask)
         
         # 使用CUDA统计model函数的运行时间并用logger打印
         torch.cuda.synchronize()
@@ -327,7 +404,7 @@ class Step1XEdit(nn.Module):
         start_event.record()
         if not self.blocks_to_swap:
             logger.info(f"not self.blocks_to_swap")
-            for block in self.double_blocks:
+            for i, block in enumerate(self.double_blocks):
                 current['layer'] = i
                 img, txt = block(img=img, txt=txt, vec=vec, pe=pe, cache_dic=cache_dic, current=current)
 
@@ -336,14 +413,14 @@ class Step1XEdit(nn.Module):
             if cache_dic['Delta-DiT']:
                 delta_base = img
             
-            for block in self.single_blocks:
+            for i, block in enumerate(self.single_blocks):
                 current['layer'] = i
                 img = block(img, vec=vec, pe=pe, cache_dic=cache_dic, current=current)
         else:
             logger.info(f"self.blocks_to_swap")
             for block_idx, block in enumerate(self.double_blocks):
                 self.offloader_double.wait_for_block(block_idx)
-                current['layer'] = i
+                current['layer'] = block_idx
                 img, txt = block(img=img, txt=txt, vec=vec, pe=pe, cache_dic=cache_dic, current=current)
                 self.offloader_double.submit_move_blocks(self.double_blocks, block_idx)
 
@@ -353,7 +430,7 @@ class Step1XEdit(nn.Module):
 
             for block_idx, block in enumerate(self.single_blocks):
                 self.offloader_single.wait_for_block(block_idx)
-                current['layer'] = i
+                current['layer'] = block_idx
                 img = block(img, vec=vec, pe=pe, cache_dic=cache_dic, current=current)
                 self.offloader_single.submit_move_blocks(self.single_blocks, block_idx)
         

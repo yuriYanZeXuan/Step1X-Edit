@@ -27,7 +27,7 @@ from einops import rearrange
 from liger_kernel.ops.rms_norm import LigerRMSNormFunction
 from torch import Tensor, nn
 from torch.utils.checkpoint import checkpoint
-from cache_functions import taylor_formula, derivative_approximation, taylor_cache_init, \
+from .cache_functions import taylor_formula, derivative_approximation, taylor_cache_init, \
     force_init, cache_cutfresh, update_cache
 
 
@@ -81,6 +81,26 @@ MEMORY_LAYOUT = {
     ),
 }
 
+def attention_cached(q: Tensor, k: Tensor, v: Tensor, pe: Tensor, **kwargs) -> Tensor:
+    
+    cache_dic = kwargs.get('cache_dic', None)
+    current = kwargs.get('current', None)     
+
+    q, k = apply_rope(q, k, pe)
+    
+    if cache_dic is None:
+        x, score = dot_product_attention(q, k, v)
+        #x = torch.nn.functional.scaled_dot_product_attention(q, k, v)
+    elif cache_dic['cache_type'] == 'attention':
+        x, score = dot_product_attention(q, k, v)
+        cache_dic['attn_map'][-1][current['stream']][current['layer']]['total'] = score
+    else:
+        x = torch.nn.functional.scaled_dot_product_attention(q, k, v)
+        #x, score = dot_product_attention(q, k, v)
+    x = rearrange(x, "B H L D -> B L (H D)")
+
+    return x
+
 
 def attention(
     q,
@@ -95,6 +115,7 @@ def attention(
     max_seqlen_q=None,
     max_seqlen_kv=None,
     batch_size=1,
+    **kwargs
 ):
     """
     Perform QKV self attention.
@@ -122,7 +143,11 @@ def attention(
     q = pre_attn_layout(q)
     k = pre_attn_layout(k)
     v = pre_attn_layout(v)
-
+    cache_dic = kwargs.get('cache_dic', None)
+    current = kwargs.get('current', None)     
+    
+            
+            
     if mode == "torch":
         if attn_mask is not None and attn_mask.dtype != torch.bool:
             attn_mask = attn_mask.to(q.dtype)
@@ -169,6 +194,8 @@ def attention(
         attn = (q @ k.transpose(-2, -1)) * scale_factor
         attn += attn_bias
         attn = attn.softmax(dim=-1)
+        if cache_dic is not None and cache_dic['cache_type'] == 'attention':
+            cache_dic['attn_map'][-1][current['stream']][current['layer']]['total'] = attn
         attn = torch.dropout(attn, p=drop_rate, train=True)
         x = attn @ v
     else:
@@ -401,12 +428,12 @@ def rope(pos, dim: int, theta: int):
     return out.float()
 
 
-def attention_after_rope(q, k, v, pe, mode):
+def attention_after_rope(q, k, v, pe, mode, **kwargs):
     from .attention import attention
     
     q, k = apply_rope(q, k, pe)
     
-    x = attention(q, k, v, mode)
+    x = attention(q, k, v, mode, **kwargs)
     return x
 
 
@@ -590,7 +617,7 @@ class DoubleStreamBlock(nn.Module):
         cache_dic = kwargs.get('cache_dic', None)
         current = kwargs.get('current', None)      
         
-        if cache_dic is not None:
+        if cache_dic is None:
             img_mod1, img_mod2 = self.img_mod(vec)
             txt_mod1, txt_mod2 = self.txt_mod(vec)
 
@@ -613,14 +640,30 @@ class DoubleStreamBlock(nn.Module):
             txt_q, txt_k = self.txt_attn.norm(txt_q, txt_k, txt_v)
 
             # run actual attention
+            """
+            2025-08-06 12:24:07,180 - INFO - layers.py:671 - txt_q.shape: torch.Size([2, 640, 24, 128])
+            2025-08-06 12:24:07,180 - INFO - layers.py:672 - img_q.shape: torch.Size([2, 2030, 24, 128])
+            2025-08-06 12:24:07,180 - INFO - layers.py:673 - txt_k.shape: torch.Size([2, 640, 24, 128])
+            2025-08-06 12:24:07,180 - INFO - layers.py:674 - img_k.shape: torch.Size([2, 2030, 24, 128])
+            2025-08-06 12:24:07,180 - INFO - layers.py:675 - txt_v.shape: torch.Size([2, 640, 24, 128])
+            2025-08-06 12:24:07,180 - INFO - layers.py:676 - img_v.shape: torch.Size([2, 2030, 24, 128])
+            """
+            # logger.info(f"txt_q.shape: {txt_q.shape}")
+            # logger.info(f"img_q.shape: {img_q.shape}")
+            # logger.info(f"txt_k.shape: {txt_k.shape}")
+            # logger.info(f"img_k.shape: {img_k.shape}")
+            # logger.info(f"txt_v.shape: {txt_v.shape}")
+            # logger.info(f"img_v.shape: {img_v.shape}")
             q = torch.cat((txt_q, img_q), dim=1)
             k = torch.cat((txt_k, img_k), dim=1)
             v = torch.cat((txt_v, img_v), dim=1)
 
             attn = attention_after_rope(q, k, v, pe, self.mode)
+            # logger.info(f"Original attn: {attn.shape}  txt: {txt.shape}")
             txt_attn, img_attn = attn[:, : txt.shape[1]], attn[:, txt.shape[1] :]
 
             # calculate the img bloks
+            # logger.info(f"Original img_attn: {img_attn.shape}")
             img = img + img_mod1.gate * self.img_attn.proj(img_attn)
             img_mlp = self.img_mlp(
                 (1 + img_mod2.scale) * self.img_norm2(img) + img_mod2.shift
@@ -647,7 +690,7 @@ class DoubleStreamBlock(nn.Module):
                 img_modulated = self.img_norm1(img)
                 img_modulated = (1 + img_mod1.scale) * img_modulated + img_mod1.shift
                 img_qkv = self.img_attn.qkv(img_modulated)
-                img_q, img_k, img_v = rearrange(img_qkv, "B L (K H D) -> K B H L D", K=3, H=self.num_heads)
+                img_q, img_k, img_v = rearrange(img_qkv, "B L (K H D) -> K B L H D", K=3, H=self.num_heads)
                 
                 if cache_dic['cache_type'] == 'k-norm':
                     img_k_norm = img_k.norm(dim=-1, p=2).mean(dim=1)
@@ -662,7 +705,7 @@ class DoubleStreamBlock(nn.Module):
                 txt_modulated = self.txt_norm1(txt)
                 txt_modulated = (1 + txt_mod1.scale) * txt_modulated + txt_mod1.shift
                 txt_qkv = self.txt_attn.qkv(txt_modulated)
-                txt_q, txt_k, txt_v = rearrange(txt_qkv, "B L (K H D) -> K B H L D", K=3, H=self.num_heads)
+                txt_q, txt_k, txt_v = rearrange(txt_qkv, "B L (K H D) -> K B L H D", K=3, H=self.num_heads)
 
                 if cache_dic['cache_type'] == 'k-norm':
                     txt_k_norm = txt_k.norm(dim=-1, p=2).mean(dim=1)
@@ -674,14 +717,26 @@ class DoubleStreamBlock(nn.Module):
                 txt_q, txt_k = self.txt_attn.norm(txt_q, txt_k, txt_v)
 
                 # run actual attention
-                q = torch.cat((txt_q, img_q), dim=2)
-                k = torch.cat((txt_k, img_k), dim=2)
-                v = torch.cat((txt_v, img_v), dim=2)
+                # logger.info(f"txt_q.shape: {txt_q.shape}")
+                # logger.info(f"img_q.shape: {img_q.shape}")
+                # logger.info(f"txt_k.shape: {txt_k.shape}")
+                # logger.info(f"img_k.shape: {img_k.shape}")
+                # logger.info(f"txt_v.shape: {txt_v.shape}")
+                # logger.info(f"img_v.shape: {img_v.shape}")
+                q = torch.cat((txt_q, img_q), dim=1)
+                k = torch.cat((txt_k, img_k), dim=1)
+                v = torch.cat((txt_v, img_v), dim=1)
 
-                attn = attention(q, k, v, pe=pe, cache_dic=cache_dic, current=current)
+                attn = attention_after_rope(q, k, v, pe, mode=self.mode, cache_dic=cache_dic, current=current)
+                # attn = attention_cached(q, k, v, pe=pe, cache_dic=cache_dic, current=current)
                 #cache_dic['cache'][-1]['double_stream'][current['layer']]['attn'] = attn
                 #derivative_approximation(cache_dic=cache_dic, current=current, feature=attn)
-
+                # logger.info(f"caching attn: {attn.shape}  txt: {txt.shape}")
+                """
+                caching attn: torch.Size([2, 24, 341760])  
+                txt: torch.Size([2, 640, 3072])
+                caching img_attn: torch.Size([2, 0, 341760])
+                """
                 txt_attn, img_attn = attn[:, : txt.shape[1]], attn[:, txt.shape[1] :]
                 cache_dic['txt_shape'] = txt.shape[1]
                 
@@ -693,6 +748,7 @@ class DoubleStreamBlock(nn.Module):
                 current['module'] = 'img_attn'
                 force_init(cache_dic=cache_dic, current=current, tokens=img)
                 taylor_cache_init(cache_dic=cache_dic, current=current)
+                # logger.info(f"caching img_attn: {img_attn.shape}")
                 img_attn_out = self.img_attn.proj(img_attn)
                 derivative_approximation(cache_dic=cache_dic, current=current, feature=img_attn_out)
                 img = img + img_mod1.gate * img_attn_out
@@ -878,7 +934,7 @@ class SingleStreamBlock(nn.Module):
             q, k = self.norm(q, k, v)
 
             # compute attention
-            attn = attention_after_rope(q, k, v, pe, self.mode)
+            attn = attention_after_rope(q, k, v, pe, mode=self.mode, cache_dic=cache_dic, current=current)
             # compute activation in mlp stream, cat again and run second linear layer
             output = self.linear2(torch.cat((attn, self.mlp_act(mlp)), 2))
         else:
@@ -896,7 +952,7 @@ class SingleStreamBlock(nn.Module):
                 force_init(cache_dic=cache_dic, current=current, tokens=mlp)
                 current['module'] = 'attn'
                 taylor_cache_init(cache_dic=cache_dic, current=current)
-                q, k, v = rearrange(qkv, "B L (K H D) -> K B H L D", K=3, H=self.num_heads)
+                q, k, v = rearrange(qkv, "B L (K H D) -> K B L H D", K=3, H=self.num_heads)
 
                 if cache_dic['cache_type'] == 'k-norm':
                     cache_dic['k-norm'][-1][current['stream']][current['layer']]['total'] = k.norm(dim=-1, p=2).mean(dim=1)
@@ -906,7 +962,8 @@ class SingleStreamBlock(nn.Module):
                 q, k = self.norm(q, k, v)
 
                 # compute attention
-                attn = attention(q, k, v, pe=pe, cache_dic=cache_dic, current=current)
+                attn = attention_after_rope(q, k, v, pe, mode=self.mode, cache_dic=cache_dic, current=current)
+                # attn = attention_cached(q, k, v, pe=pe, cache_dic=cache_dic, current=current)
                 force_init(cache_dic=cache_dic, current=current, tokens=attn)
 
                 cache_dic['cache'][-1]['single_stream'][current['layer']]['attn'] = attn
