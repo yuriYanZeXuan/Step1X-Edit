@@ -4,8 +4,10 @@ import torch
 import torch.nn
 from einops import rearrange
 from torch import nn
-
+import logging
 from .layers import MLP, TextProjection, TimestepEmbedder, apply_gate, attention
+
+logger = logging.getLogger(__name__)
 
 
 class RMSNorm(nn.Module):
@@ -199,6 +201,7 @@ class IndividualTokenRefinerBlock(torch.nn.Module):
         x = x + apply_gate(self.self_attn_proj(attn), gate_msa)
         
         if self.need_CA:
+            raise NotImplementedError("Cross-Attention is not implemented")
             x = self.cross_attnblock(x, c, attn_mask, y)
 
         # FFN Layer
@@ -440,6 +443,20 @@ class SingleTokenRefiner(torch.nn.Module):
                 dim=1
             ) / mask_float.sum(dim=1)
         context_aware_representations = self.c_embedder(context_aware_representations)
+        # logger.info(f"timestep_aware_representations: {timestep_aware_representations.shape}, context_aware_representations: {context_aware_representations.shape}")
+        # timestep_aware_representations: torch.Size([58, 4096]), context_aware_representations: torch.Size([2, 4096])
+        if timestep_aware_representations.shape != context_aware_representations.shape:
+            # 处理时间步和上下文表示batch size不匹配的情况
+            if timestep_aware_representations.shape[0] != context_aware_representations.shape[0]:
+                # 时间步数量一定是上下文表示的整数倍，直接重复堆叠
+                repeat_times = timestep_aware_representations.shape[0] // context_aware_representations.shape[0]
+                context_aware_representations = context_aware_representations.repeat(repeat_times, 1)
+                x=x.repeat(repeat_times, 1, 1)
+                # logger.info(f"x.shape: {x.shape}")
+                mask=mask.repeat(repeat_times, 1)
+                # logger.info(f"mask.shape: {mask.shape}")
+        # logger.info(f"timestep_aware_representations: {timestep_aware_representations.shape}, context_aware_representations: {context_aware_representations.shape}")
+        # torch.Size([58, 4096])
         c = timestep_aware_representations + context_aware_representations
 
         x = self.input_embedder(x)
@@ -476,8 +493,24 @@ class Qwen2Connector(torch.nn.Module):
             self.scale_factor = nn.Parameter(torch.zeros(1))
             with torch.no_grad():
                 self.scale_factor.data += -(1 - 0.09)
-
+                
     def forward(self, x,t,mask):
+        t = t * 1000 # fix the times embedding bug
+        mask_float = mask.unsqueeze(-1)  # [b, s1, 1]
+
+        x_mean = (x * mask_float).sum(
+                dim=1
+            ) / mask_float.sum(dim=1)
+
+        if self.version == 'v1.0':
+            x_mean = x_mean * (1 + self.scale_factor.to(x.dtype))
+
+        global_out=self.global_proj_out(x_mean)
+        encoder_hidden_states = self.S(x,t,mask)
+        return encoder_hidden_states, global_out
+    
+    
+    def forward_backup(self, x,t,mask):
         t = t * 1000 # fix the times embedding bug
         mask_float = mask.unsqueeze(-1)  # [b, s1, 1]
 

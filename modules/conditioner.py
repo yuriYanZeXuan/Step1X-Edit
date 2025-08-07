@@ -236,6 +236,7 @@ class Qwen25VL_7b_Embedder_backup(torch.nn.Module):
         return next(self.parameters()).dtype
 
     def forward(self, caption, ref_images):
+        # TODO: qwen-VL vlm to be pruned
         text_list = caption
         embs = torch.zeros(
             len(text_list),

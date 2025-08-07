@@ -183,6 +183,10 @@ class ImageGenerator:
         # 将dit网络结构打印到文本文件中
         # with open("dit_structure.txt", "w", encoding="utf-8") as f:
         #     f.write(str(self.dit))
+        
+        # 将dit网络结构打印到文本文件中
+        with open("llm_encoder_structure.txt", "w", encoding="utf-8") as f:
+            f.write(str(self.llm_encoder))
             
         if not quantized:
             self.dit = self.dit.to(dtype=torch.bfloat16)
@@ -204,9 +208,10 @@ class ImageGenerator:
         else:
             self.lora_module = None
         self.mode = mode
-        self.use_cache = kwargs.get("use_cache", True)
-        self.use_taylor_series = kwargs.get("use_taylor_series", False)
-        self.use_teacache = kwargs.get("use_teacache", False)
+        logger.info(f"kwargs: {kwargs}")
+        # 自动将kwargs中的所有属性注册为成员变量
+        for k, v in kwargs.items():
+            setattr(self, k, v)
 
 
     def prepare(self, prompt, img, ref_image, ref_image_raw):
@@ -394,6 +399,11 @@ class ImageGenerator:
             pbar = tqdm(itertools.pairwise(timesteps), desc='denoising...')
         else:
             pbar = itertools.pairwise(timesteps)
+        # timesteps_scheduler为在timesteps上所有时间步都预处理好的t_vec的堆叠，shape为(steps*bs, 1)
+        timesteps_scheduler = torch.cat(
+            [torch.full((img.shape[0],), t, dtype=img.dtype, device=img.device) for t in timesteps],
+            dim=0
+        )
         for idx, (t_curr, t_prev) in enumerate(pbar):
             if img.shape[0] == 1 and cfg_guidance != -1:
                 img = torch.cat([img, img], dim=0)
@@ -412,6 +422,8 @@ class ImageGenerator:
                     mask=mask,
                     cache_dic=cache_dic,
                     current=current,
+                    timesteps_scheduler=timesteps_scheduler,
+                    parallel_connector=False if not self.parallel_connector else self.parallel_connector,
                 )
             else:   
                 pred = self.dit(
@@ -590,7 +602,15 @@ class ImageGenerator:
         if self.task_type == 'edit':
             ref_images = torch.cat([ref_images, ref_images], dim=0)
             ref_images_raw = torch.cat([ref_images_raw, ref_images_raw], dim=0)
+            torch.cuda.synchronize()
+            start_event = torch.cuda.Event(enable_timing=True)
+            end_event = torch.cuda.Event(enable_timing=True)
+            start_event.record()
             inputs = self.prepare([prompt, negative_prompt], x, ref_image=ref_images, ref_image_raw=ref_images_raw)
+            end_event.record()
+            torch.cuda.synchronize()
+            elapsed_time_ms = start_event.elapsed_time(end_event)
+            logger.info(f"prepare函数CUDA耗时: {elapsed_time_ms:.2f} ms")
         else:
             ref_images_raw = torch.cat([ref_images_raw, ref_images_raw], dim=0)
             inputs = self.prepare_t2i([prompt, negative_prompt], x, ref_images_raw)
@@ -725,6 +745,7 @@ class ImageGeneratorBackUp:
             prompt = [prompt]
         if self.offload:
             self.llm_encoder = self.llm_encoder.to(self.device)
+        # TODO llm_encoder to be pruned
         txt, mask = self.llm_encoder(prompt, ref_image_raw)
         if self.offload:
             self.llm_encoder = self.llm_encoder.cpu()

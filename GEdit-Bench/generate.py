@@ -727,7 +727,7 @@ class StepEditGenerator(BaseGenerator):
             version=version,
             **gen_config
         )
-        if "use_teacache" in gen_config: 
+        if gen_config.get("use_teacache", False): 
             self.pipe.dit.__class__.enable_teacache = True
             self.pipe.dit.__class__.cnt = 0
             self.pipe.dit.__class__.num_steps = gen_config.get("steps", 28)

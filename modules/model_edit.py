@@ -372,14 +372,70 @@ class Step1XEdit(nn.Module):
         if current is None or cache_dic is None:
             return self.forward_backup(img, img_ids, txt_ids, timesteps, llm_embedding, t_vec, mask)
         
-        # 使用CUDA统计model函数的运行时间并用logger打印
+        # 将输入和输出的张量存到字典，然后以序整体保存到文件中，如有同名文件就换名（用连续增加数字）保存
+        # import os
+        
+        # # 使用CUDA统计model函数的运行时间并用logger打印
         torch.cuda.synchronize()
         start_event = torch.cuda.Event(enable_timing=True)
         end_event = torch.cuda.Event(enable_timing=True)
         start_event.record()
-        txt, y = self.connector(
-            llm_embedding, t_vec, mask
-        )
+
+        # save_dir = "./tensor_records"
+        # os.makedirs(save_dir, exist_ok=True)
+        # tensor_dict = {}
+
+        # # 收集输入张量
+        # tensor_dict['llm_embedding'] = llm_embedding.detach().cpu()
+        # tensor_dict['t_vec'] = t_vec.detach().cpu()
+        # tensor_dict['mask'] = mask.detach().cpu()
+        # assert mask is None, "mask is not None"
+        # 计算输出
+        # TODO: connector to be parallelized
+        # logger.info(f"kwargs.get('timesteps_scheduler', False): {kwargs.get('timesteps_scheduler', None)}")
+        # timesteps_scheduler: torch.Size([2*steps])
+        # logger.info(f"timesteps: {timesteps}, t_vec: {t_vec}")
+        # timesteps: tensor([0.9806, 0.9806], device='cuda:0'), t_vec: tensor([0.9806, 0.9806], device='cuda:0')
+        # logger.info(f"timesteps: {timesteps.shape}, t_vec: {t_vec.shape}, llm_embedding: {llm_embedding.shape}, mask: {mask.shape}")
+        # timesteps: torch.Size([2]), t_vec: torch.Size([2]), llm_embedding: torch.Size([2, 640, 3584]), mask: torch.Size([2, 640])
+        if kwargs.get('parallel_connector', False):
+            assert kwargs.get('timesteps_scheduler', None) is not None, "timesteps_scheduler is not None"
+            # let timesteps_scheduler be a tensor of shape (steps, bs, 1)
+            timesteps_scheduler=kwargs.get('timesteps_scheduler', None)
+            if cache_dic.get('connector', None) is None:
+                txts, y = self.connector(
+                    llm_embedding, timesteps_scheduler, mask
+                )
+                cache_dic['connector'] = txts, y
+                logger.info(f"cache miss at timestep: {current['step']}")
+                # cache miss,with txt.shape: torch.Size([2, 640, 4096]), y.shape: torch.Size([2, 768])
+            else:
+                logger.info(f"cache hit at timestep: {current['step']}")
+                txts, y = cache_dic['connector']
+            txt=txts[2*current['step']:2*(current['step']+1)]
+        else:
+            txt, y = self.connector(
+                llm_embedding, t_vec, mask
+            )
+
+        # # 收集输出张量
+        # tensor_dict['txt'] = txt.detach().cpu()
+        # tensor_dict['y'] = y.detach().cpu()
+
+        # # 按照key递增顺序保存
+        # sorted_keys = sorted(tensor_dict.keys())
+        # sorted_tensor_dict = {k: tensor_dict[k] for k in sorted_keys}
+
+        # # 自动递增文件名
+        # base_filename = "intermediate_tensors"
+        # idx = 0
+        # while True:
+        #     filename = f"{base_filename}_{idx}.pt"
+        #     file_path = os.path.join(save_dir, filename)
+        #     if not os.path.exists(file_path):
+        #         break
+        #     idx += 1
+        # torch.save(sorted_tensor_dict, file_path)
         end_event.record()
         torch.cuda.synchronize()
         logger.info(f"connector函数运行时间: {start_event.elapsed_time(end_event)} ms")

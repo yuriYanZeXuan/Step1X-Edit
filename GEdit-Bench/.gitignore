@@ -8,3 +8,6 @@ csv_results/
 *.env
 */*.env
 *.txt
+*.pt
+*.safetensors
+tensor_records/

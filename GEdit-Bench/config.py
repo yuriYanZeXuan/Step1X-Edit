@@ -85,14 +85,16 @@ OVIS_GENERATION_CONFIG = {
 STEPEDIT_GENERATION_CONFIG = {
     "steps": 28,
     
-    "use_teacache": True,
+    "use_teacache": False,
     "teacache_threshold": 0.2,
     "ring_degree": 1,
     "ulysses_degree": 1,
     "cfg_degree": 1,
     
-    "use_cache": False,
-    "use_taylor_series": False,
+    "use_cache": True,
+    "use_taylor_series": True,
+    
+    "parallel_connector": True,
 }
 
 # 结果目录配置

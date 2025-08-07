@@ -81,26 +81,6 @@ MEMORY_LAYOUT = {
     ),
 }
 
-def attention_cached(q: Tensor, k: Tensor, v: Tensor, pe: Tensor, **kwargs) -> Tensor:
-    
-    cache_dic = kwargs.get('cache_dic', None)
-    current = kwargs.get('current', None)     
-
-    q, k = apply_rope(q, k, pe)
-    
-    if cache_dic is None:
-        x, score = dot_product_attention(q, k, v)
-        #x = torch.nn.functional.scaled_dot_product_attention(q, k, v)
-    elif cache_dic['cache_type'] == 'attention':
-        x, score = dot_product_attention(q, k, v)
-        cache_dic['attn_map'][-1][current['stream']][current['layer']]['total'] = score
-    else:
-        x = torch.nn.functional.scaled_dot_product_attention(q, k, v)
-        #x, score = dot_product_attention(q, k, v)
-    x = rearrange(x, "B H L D -> B L (H D)")
-
-    return x
-
 
 def attention(
     q,
@@ -190,7 +170,7 @@ def attention(
             else:
                 attn_bias += attn_mask
 
-        # TODO: Maybe force q and k to be float32 to avoid numerical overflow
+        # Maybe force q and k to be float32 to avoid numerical overflow
         attn = (q @ k.transpose(-2, -1)) * scale_factor
         attn += attn_bias
         attn = attn.softmax(dim=-1)
@@ -728,7 +708,6 @@ class DoubleStreamBlock(nn.Module):
                 v = torch.cat((txt_v, img_v), dim=1)
 
                 attn = attention_after_rope(q, k, v, pe, mode=self.mode, cache_dic=cache_dic, current=current)
-                # attn = attention_cached(q, k, v, pe=pe, cache_dic=cache_dic, current=current)
                 #cache_dic['cache'][-1]['double_stream'][current['layer']]['attn'] = attn
                 #derivative_approximation(cache_dic=cache_dic, current=current, feature=attn)
                 # logger.info(f"caching attn: {attn.shape}  txt: {txt.shape}")
@@ -963,7 +942,6 @@ class SingleStreamBlock(nn.Module):
 
                 # compute attention
                 attn = attention_after_rope(q, k, v, pe, mode=self.mode, cache_dic=cache_dic, current=current)
-                # attn = attention_cached(q, k, v, pe=pe, cache_dic=cache_dic, current=current)
                 force_init(cache_dic=cache_dic, current=current, tokens=attn)
 
                 cache_dic['cache'][-1]['single_stream'][current['layer']]['attn'] = attn
