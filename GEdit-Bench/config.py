@@ -95,6 +95,16 @@ STEPEDIT_GENERATION_CONFIG = {
     "use_taylor_series": True,
     
     "parallel_connector": True,
+    
+    "prune_vlm": False,
+    "VLM_pruned_layer": 2,
+    "VLM_image_token_start_index": 35, 
+    "VLM_image_token_length": 576,
+    "VLM_max_num_trunction": 128,
+    "VLM_reduction_ratio": 0.778,
+    "VLM_retain_token_num_for_llava_next": 320,
+    "VLM_pivot_image_token": 4,
+    "VLM_pivot_text_token": 4,
 }
 
 # 结果目录配置
