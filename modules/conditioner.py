@@ -124,7 +124,8 @@ User Prompt:'''
                 result.append(temp)
 
             return result
-
+        # logger.info(f"text_list: {text_list}, ref_images: {ref_images.shape}")
+        # text_list: ['将背景改为城市街道', ''], ref_images: torch.Size([2, 3, 560, 464])
         for idx, (txt, imgs) in enumerate(zip(text_list, ref_images)):
             # image_list = []
             # for idx_img in imgs:
@@ -289,7 +290,7 @@ class Qwen25VL_7b_Embedder_backup(torch.nn.Module):
                 result.append(temp)
 
             return result
-
+        
         for idx, (txt, imgs) in enumerate(zip(text_list, ref_images)):
 
             messages = [{"role": "user", "content": []}]
