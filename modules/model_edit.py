@@ -391,7 +391,6 @@ class Step1XEdit(nn.Module):
         # tensor_dict['mask'] = mask.detach().cpu()
         # assert mask is None, "mask is not None"
         # 计算输出
-        # TODO: connector to be parallelized
         # logger.info(f"kwargs.get('timesteps_scheduler', False): {kwargs.get('timesteps_scheduler', None)}")
         # timesteps_scheduler: torch.Size([2*steps])
         # logger.info(f"timesteps: {timesteps}, t_vec: {t_vec}")

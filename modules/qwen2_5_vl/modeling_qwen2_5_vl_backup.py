@@ -43,7 +43,6 @@ from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import auto_docstring, can_return_tuple, is_torch_flex_attn_available, logging
 from .configuration_qwen2_5_vl import Qwen2_5_VLConfig, Qwen2_5_VLTextConfig, Qwen2_5_VLVisionConfig
 
-import logging
 
 if is_flash_attn_available():
     from transformers.modeling_flash_attention_utils import apply_rotary_emb, flash_attn_varlen_func
@@ -58,7 +57,7 @@ if is_torch_flex_attn_available():
     from transformers.integrations.flex_attention import make_flex_block_causal_mask
 
 
-logger = logging.getLogger(__name__)
+logger = logging.get_logger(__name__)
 
 
 class Qwen2_5_VLMLP(nn.Module):
@@ -572,41 +571,7 @@ class Qwen2_5_VLModelOutputWithPast(ModelOutput):
     attentions: Optional[Tuple[torch.FloatTensor]] = None
     rope_deltas: Optional[torch.LongTensor] = None
 
-class Qwen2RotaryEmbedding(nn.Module):
-    def __init__(self, dim, max_position_embeddings=2048, base=10000, device=None):
-        super().__init__()
 
-        self.dim = dim
-        self.max_position_embeddings = max_position_embeddings
-        self.base = base
-        inv_freq = 1.0 / (self.base ** (torch.arange(0, self.dim, 2, dtype=torch.int64).float().to(device) / self.dim))
-        self.register_buffer("inv_freq", inv_freq, persistent=False)
-
-        # Build here to make `torch.jit.trace` work.
-        self._set_cos_sin_cache(
-            seq_len=max_position_embeddings, device=self.inv_freq.device, dtype=torch.get_default_dtype()
-        )
-
-    def _set_cos_sin_cache(self, seq_len, device, dtype):
-        self.max_seq_len_cached = seq_len
-        t = torch.arange(self.max_seq_len_cached, device=device, dtype=torch.int64).type_as(self.inv_freq)
-
-        freqs = torch.outer(t, self.inv_freq)
-        # Different from paper, but it uses a different permutation in order to obtain the same calculation
-        emb = torch.cat((freqs, freqs), dim=-1)
-        self.register_buffer("cos_cached", emb.cos().to(dtype), persistent=False)
-        self.register_buffer("sin_cached", emb.sin().to(dtype), persistent=False)
-
-    def forward(self, x, seq_len=None):
-        # x: [bs, num_attention_heads, seq_len, head_size]
-        if seq_len > self.max_seq_len_cached:
-            self._set_cos_sin_cache(seq_len=seq_len, device=x.device, dtype=x.dtype)
-
-        return (
-            self.cos_cached[:seq_len].to(dtype=x.dtype),
-            self.sin_cached[:seq_len].to(dtype=x.dtype),
-        )
-        
 class Qwen2_5_VLRotaryEmbedding(nn.Module):
     def __init__(self, config: Qwen2_5_VLTextConfig, device=None):
         super().__init__()
@@ -775,14 +740,7 @@ class Qwen2_5_VLAttention(nn.Module):
         key_states = key_states.view(bsz, q_len, -1, self.head_dim).transpose(1, 2)
         value_states = value_states.view(bsz, q_len, -1, self.head_dim).transpose(1, 2)
 
-        # [x]: fix Rope for Token Pruning
         cos, sin = position_embeddings
-        # kv_seq_len = key_states.shape[-2]
-        # if past_key_value is not None:
-        #     kv_seq_len += past_key_value.get_usable_length(kv_seq_len, self.layer_idx)
-        # rotary_seq_len = (position_ids[:, -1].max().item() + 1 if position_ids is not None else kv_seq_len)
-        # cos, sin = self.rotary_emb(value_states, seq_len=rotary_seq_len)  
-        
         query_states, key_states = apply_multimodal_rotary_pos_emb(
             query_states, key_states, cos, sin, self.rope_scaling["mrope_section"]
         )
@@ -985,14 +943,7 @@ class Qwen2_5_VLSdpaAttention(Qwen2_5_VLAttention):
         key_states = key_states.view(bsz, q_len, -1, self.head_dim).transpose(1, 2)
         value_states = value_states.view(bsz, q_len, -1, self.head_dim).transpose(1, 2)
 
-        # [x]: fix Rope for Token Pruning in SDPA
         cos, sin = position_embeddings
-        # kv_seq_len = key_states.shape[-2]
-        # if past_key_value is not None:
-        #     kv_seq_len += past_key_value.get_usable_length(kv_seq_len, self.layer_idx)
-        # rotary_seq_len = (position_ids[:, -1].max().item() + 1 if position_ids is not None else kv_seq_len)
-        # cos, sin = self.rotary_emb(value_states, seq_len=rotary_seq_len)  
-        
         query_states, key_states = apply_multimodal_rotary_pos_emb(
             query_states, key_states, cos, sin, self.rope_scaling["mrope_section"]
         )
@@ -1141,10 +1092,6 @@ class Qwen2_5_VLTextModel(Qwen2_5_VLPreTrainedModel):
         self.layers = nn.ModuleList(
             [Qwen2_5_VLDecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
         )
-        # INSERT_YOUR_CODE
-        # 将self.layers结构打印到文件中
-        # with open("/root/autodl-tmp/Step1X-Edit/assets/layers_structure.txt", "w", encoding="utf-8") as f:
-        #     f.write(str(self.layers))
         self._attn_implementation = config._attn_implementation
         self.norm = Qwen2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.rotary_emb = Qwen2_5_VLRotaryEmbedding(config=config)
@@ -1158,71 +1105,7 @@ class Qwen2_5_VLTextModel(Qwen2_5_VLPreTrainedModel):
 
     def set_input_embeddings(self, value):
         self.embed_tokens = value
-        
-    def get_retained_image_token(self, config, last_layer_state: torch.Tensor, any_states: torch.Tensor) -> torch.Tensor:
-        VLM_config = config.VLM_config
-        K = VLM_config['K']  # pruned layer
-        image_token_start_index = VLM_config['image_token_start_index']
-        image_token_length = VLM_config['image_token_length']
 
-        pivot_image_token = VLM_config['pivot_image_token']
-        pivot_text_token = VLM_config['pivot_text_token']
-
-        reduction_ratio = VLM_config['reduction_ratio']
-        TOKEN_TOPK = int(image_token_length * (1 - reduction_ratio) / (pivot_image_token + pivot_text_token))
-
-        device = last_layer_state.device
-
-        # Check the dimensions of any_states and handle accordingly
-        if any_states.dim() == 4:
-            any_states = any_states.permute(0, 2, 1, 3).reshape(any_states.shape[0], any_states.shape[2], -1)
-        elif any_states.dim() == 3:
-            # If it's already 3D, just reshape it
-            any_states = any_states.reshape(any_states.shape[0], any_states.shape[1], -1)
-        else:
-            raise ValueError(f"Unexpected dimensions for any_states: {any_states.shape}")
-
-        k_states_image_token = any_states[0][image_token_start_index:image_token_start_index + image_token_length, :]
-        k_states_query_token = any_states[0][image_token_start_index + image_token_length:, :]
-
-        k_states_image_token_L1_norm = torch.norm(k_states_image_token, p=1, dim=-1)
-        k_states_query_token_L1_norm = torch.norm(k_states_query_token, p=1, dim=-1)
-
-        # Ensure we don't exceed the available tokens
-        actual_pivot_image_token = min(pivot_image_token, k_states_image_token_L1_norm.shape[0])
-        actual_pivot_text_token = min(pivot_text_token, k_states_query_token_L1_norm.shape[0])
-
-        image_indices = (k_states_image_token_L1_norm.topk(actual_pivot_image_token).indices + image_token_start_index).tolist() 
-        query_indices = (k_states_query_token_L1_norm.topk(actual_pivot_text_token).indices + image_token_start_index + image_token_length).tolist()
-        indices_set = set(image_indices + query_indices)
-
-        valid_indices = set(range(image_token_start_index, image_token_start_index + image_token_length)) - set(image_indices)
-
-        valid_indices_list = list(valid_indices)  
-        for item in list(indices_set):
-            # logger.info(f"last_layer_state: {last_layer_state.shape}")
-            # last_layer_state: torch.Size([1, 539, 3584])
-            
-            # logger.info(f"item: {item}")
-            # 224
-            # logger.info(f"valid_indices_list: {valid_indices_list}")
-            valid_vectors = last_layer_state[0][valid_indices_list, :]
-            # logger.info(f"valid_vectors: {valid_vectors.shape}")
-            cos_sim = -torch.nn.functional.cosine_similarity(last_layer_state[0][item, :], valid_vectors, dim=-1)
-            top_k_indices = cos_sim.topk(TOKEN_TOPK).indices
-
-            top_k_real_indices = [valid_indices_list[i] for i in top_k_indices]
-            indices_set.update(top_k_real_indices)
-            
-            valid_indices.difference_update(top_k_real_indices)
-            valid_indices_list = list(valid_indices)  
-
-        indices_set.difference_update(query_indices)
-
-        retained_image_tokens_index = torch.tensor(list(indices_set), device=device)
-
-        return retained_image_tokens_index
-    
     @auto_docstring
     def forward(
         self,
@@ -1262,8 +1145,6 @@ class Qwen2_5_VLTextModel(Qwen2_5_VLPreTrainedModel):
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
 
-        batch_size, seq_length = inputs_embeds.shape[:2]
-        
         if cache_position is None:
             past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
             cache_position = torch.arange(
@@ -1284,14 +1165,12 @@ class Qwen2_5_VLTextModel(Qwen2_5_VLPreTrainedModel):
 
         # create position embeddings to be shared across the decoder layers
         position_embeddings = self.rotary_emb(hidden_states, position_ids)
-        # logger.info(f"position_embeddings: {position_embeddings[0].shape}")
-        # position_embeddings: torch.Size([3, 1, 539, 128])
+
         # decoder layers
         all_hidden_states = () if output_hidden_states else None
         all_self_attns = () if output_attentions else None
         next_decoder_cache = None
 
-        new_position_embeddings = position_embeddings
         for decoder_layer in self.layers:
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
@@ -1309,63 +1188,6 @@ class Qwen2_5_VLTextModel(Qwen2_5_VLPreTrainedModel):
                     position_embeddings,
                 )
             else:
-                # logger.info(f"VLM_config: {self.config.VLM_config}")
-                
-                VLM_config = self.config.VLM_config
-                if VLM_config is not None:
-                    K = VLM_config['K']  # pruned layer
-                    image_token_start_index = VLM_config['image_token_start_index']
-                    image_token_length = VLM_config['image_token_length']
-
-                    if decoder_layer.self_attn.layer_idx == K and seq_length > 1:
-                        logger.info(f"VLM pruning triggered, layer_idx: {decoder_layer.self_attn.layer_idx}, seq_length: {seq_length}")
-                        device = hidden_states.device
-
-                        # 统计这部分的cuda时间
-                        torch.cuda.synchronize()
-                        start_event = torch.cuda.Event(enable_timing=True)
-                        end_event = torch.cuda.Event(enable_timing=True)
-                        start_event.record()
-
-                        last_layer_state = layer_outputs[0]
-                        last_layer_state = self.norm(last_layer_state)
-                        k_states = layer_outputs[-2]
-
-                        # keep index
-                        retained_image_tokens_index = self.get_retained_image_token(self.config, last_layer_state, k_states).to(device)
-
-                        # # 修复torch.arange的边界问题
-                        start_indices = torch.arange(image_token_start_index, device=device)
-                        end_start = image_token_start_index + image_token_length
-                        end_indices = torch.arange(end_start, seq_length, device=device) if end_start < seq_length else torch.empty(0, dtype=torch.long, device=device)
-                        
-                        end_event.record()
-                        torch.cuda.synchronize()
-                        logger.info(f"VLM pruning部分CUDA运行时间: {start_event.elapsed_time(end_event)} ms")
-                        
-                        keep_indexs = torch.cat((start_indices, retained_image_tokens_index, end_indices))
-
-                        hidden_states = hidden_states[:,keep_indexs,:]
-                        # if causal_mask is not None:
-                        #     causal_mask = causal_mask[:,:,:hidden_states.shape[1],:hidden_states.shape[1]]
-                        new_seq_length = keep_indexs.shape[0]
-                        # cache_position = cache_position[:new_seq_length]
-                        cache_position = cache_position[keep_indexs]  
-                        causal_mask = self._update_causal_mask(
-                                None, hidden_states, cache_position, None, output_attentions
-                            )
-                        position_ids = position_ids[:, :, keep_indexs]
-                        
-                        # Update hidden_states with the pruned version
-                        # hidden_states = layer_outputs[0][:, keep_indexs, :]
-                        # logger.info(f"position_embeddings[0].shape: {position_embeddings[0].shape}")
-                        # logger.info(f"position_embeddings[1].shape: {position_embeddings[1].shape}")
-                        # logger.info(f"keep_indexs.shape: {keep_indexs.shape}")
-                        # position_embeddings[0].shape: torch.Size([3, 1, 539, 128])
-                        # position_embeddings[1].shape: torch.Size([3, 1, 539, 128])
-                        # keep_indexs.shape: torch.Size([303])
-                        logger.info(f"position_embeddings[0][:,:,keep_indexs, :].shape: {position_embeddings[0][:,:,keep_indexs, :].shape}")
-                        new_position_embeddings=(position_embeddings[0][:,:,keep_indexs, :], position_embeddings[1][:,:,keep_indexs, :])
                 layer_outputs = decoder_layer(
                     hidden_states,
                     attention_mask=causal_mask,
@@ -1374,7 +1196,7 @@ class Qwen2_5_VLTextModel(Qwen2_5_VLPreTrainedModel):
                     output_attentions=output_attentions,
                     use_cache=use_cache,
                     cache_position=cache_position,
-                    position_embeddings=new_position_embeddings,
+                    position_embeddings=position_embeddings,
                 )
 
             hidden_states = layer_outputs[0]
@@ -1789,16 +1611,7 @@ class Qwen2_5_VLModel(Qwen2_5_VLPreTrainedModel):
                 The temporal, height and width of feature shape of each image in LLM.
         """
         pixel_values = pixel_values.type(self.visual.dtype)
-        # TODO: test cuda time
-        torch.cuda.synchronize()
-        start_event = torch.cuda.Event(enable_timing=True)
-        end_event = torch.cuda.Event(enable_timing=True)
-        start_event.record()
         image_embeds = self.visual(pixel_values, grid_thw=image_grid_thw)
-        end_event.record()
-        torch.cuda.synchronize()
-        elapsed_time_ms = start_event.elapsed_time(end_event)
-        logger.info(f"self.visual 前向传播耗时: {elapsed_time_ms:.3f} ms")
         return image_embeds
 
     @auto_docstring
@@ -1911,13 +1724,6 @@ class Qwen2_5_VLModel(Qwen2_5_VLPreTrainedModel):
                     delta = delta.repeat_interleave(batch_size // delta.shape[0], dim=0)
                 position_ids = position_ids.add(delta)
                 position_ids = position_ids.unsqueeze(0).expand(3, -1, -1)
-        # TODO: test cuda time for llm
-        
-        # 使用cuda测试时间
-        torch.cuda.synchronize()
-        start_event = torch.cuda.Event(enable_timing=True)
-        end_event = torch.cuda.Event(enable_timing=True)
-        start_event.record()
 
         outputs = self.language_model(
             input_ids=None,
@@ -1931,11 +1737,6 @@ class Qwen2_5_VLModel(Qwen2_5_VLPreTrainedModel):
             return_dict=True,
             cache_position=cache_position,
         )
-
-        end_event.record()
-        torch.cuda.synchronize()
-        elapsed_time_ms = start_event.elapsed_time(end_event)
-        logger.info(f"self.language_model 前向传播耗时: {elapsed_time_ms:.2f} ms")
 
         output = Qwen2_5_VLModelOutputWithPast(
             last_hidden_state=outputs.last_hidden_state,

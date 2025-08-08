@@ -1,6 +1,6 @@
 cache/
 logs/
-results/
+results/*
 checkpoints/
 *.logs
 __pycache__/
@@ -11,3 +11,6 @@ csv_results/
 *.pt
 *.safetensors
 tensor_records/
+csv_results_speedup/*
+log.log
+*.log

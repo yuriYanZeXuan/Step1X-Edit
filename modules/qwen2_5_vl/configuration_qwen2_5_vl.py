@@ -215,6 +215,8 @@ class Qwen2_5_VLTextConfig(PretrainedConfig):
         rope_scaling=None,
         image_token_id=None,
         video_token_id=None,
+        VLM_config=None,
+        text_length=None,
         **kwargs,
     ):
         self.vocab_size = vocab_size
@@ -252,6 +254,10 @@ class Qwen2_5_VLTextConfig(PretrainedConfig):
         rope_config_validation(self, ignore_keys={"mrope_section"})
         self.image_token_id = image_token_id
         self.video_token_id = video_token_id
+
+        # VLM prune config
+        self.VLM_config = VLM_config
+        self.text_length = text_length
 
         super().__init__(tie_word_embeddings=tie_word_embeddings, **kwargs)
 

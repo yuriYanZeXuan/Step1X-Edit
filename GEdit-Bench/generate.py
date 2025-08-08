@@ -399,7 +399,7 @@ class KontextEvalGenerator(BaseGenerator):
         self.flux = FluxKontextPipeline.from_pretrained(
             self.config["model_config"]["weight_path"],
         )
-        self.flux.to_empty(self.device)
+        self.flux.to(self.device)
         logger.info("FLUX 模型初始化完成")
 
     def _get_prompt_for_task(
@@ -486,7 +486,7 @@ class ICEditGenerator(BaseGenerator):
             ),
         )
         self.flux.load_lora_weights(self.config["model_config"]["lora_weights"])
-        self.flux.to_empty(self.device)
+        self.flux.to(self.device)
         logger.info("FLUX ICEdit 模型初始化完成")
 
     def _generate_image(

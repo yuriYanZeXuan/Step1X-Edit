@@ -151,6 +151,7 @@ class GPT4v():
             out = response['choices'][0]['message']['content']
             return out
         except:
+            print(response)
             if response['error']['code'] == 'content_policy_violation':
                 print("Code is content_policy_violation")
             elif response['error']['code'] == 'rate_limit_exceeded' or response['error']['code'] == 'insufficient_quota':

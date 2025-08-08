@@ -185,8 +185,8 @@ class ImageGenerator:
         #     f.write(str(self.dit))
         
         # 将dit网络结构打印到文本文件中
-        with open("llm_encoder_structure.txt", "w", encoding="utf-8") as f:
-            f.write(str(self.llm_encoder))
+        # with open("llm_encoder_structure.txt", "w", encoding="utf-8") as f:
+        #     f.write(str(self.llm_encoder))
             
         if not quantized:
             self.dit = self.dit.to(dtype=torch.bfloat16)
@@ -211,7 +211,19 @@ class ImageGenerator:
         logger.info(f"kwargs: {kwargs}")
         # 自动将kwargs中的所有属性注册为成员变量
         for k, v in kwargs.items():
-            setattr(self, k, v)
+            if not k.startswith("VLM"):
+                setattr(self, k, v)
+        if kwargs.get("prune_vlm", False):  
+            self.llm_encoder.model.language_model.config.VLM_config = {
+                "K": kwargs.get("VLM_pruned_layer", 2),
+                "image_token_start_index": kwargs.get("VLM_image_token_start_index", 35), 
+                "image_token_length": kwargs.get("VLM_image_token_length", 576),
+                # "max_num_trunction": kwargs.get("VLM_max_num_trunction", 128),
+                "reduction_ratio": kwargs.get("VLM_reduction_ratio", 0.778),
+                # "retain_token_num_for_llava_next": kwargs.get("VLM_retain_token_num_for_llava_next", 320),
+                "pivot_image_token": kwargs.get("VLM_pivot_image_token", 4),
+                "pivot_text_token": kwargs.get("VLM_pivot_text_token", 4),
+            }
 
 
     def prepare(self, prompt, img, ref_image, ref_image_raw):

@@ -4,8 +4,9 @@ from qwen_vl_utils import process_vision_info
 from transformers import (
     AutoProcessor,
     Qwen2VLForConditionalGeneration,
-    Qwen2_5_VLForConditionalGeneration,
+    # Qwen2_5_VLForConditionalGeneration,
 )
+from .qwen2_5_vl.modeling_qwen2_5_vl import Qwen2_5_VLForConditionalGeneration
 from torchvision.transforms import ToPILImage
 # 配置日志
 logger = logging.getLogger(__name__)
@@ -184,8 +185,18 @@ User Prompt:'''
             new_txt_ids = new_txt_ids.to(old_inputs_ids.device)
             idx1 = (old_inputs_ids == 151653).nonzero(as_tuple=True)[1][0]
             idx2 = (new_txt_ids == 151653).nonzero(as_tuple=True)[1][0]
+            logger.info(f"idx1: {idx1}, idx2: {idx2}")
+            # [x]:确定n_image_tokens，更新进VLM_config
+            if self.model.model.language_model.config.VLM_config is not None:
+                self.model.model.language_model.config.VLM_config.update({
+                    "image_token_length": idx1-idx2+1,
+                    "image_token_start_index": idx2,
+                })
+            logger.info(f"image_token_length: {idx1-idx2+1}, image_token_start_index: {idx2}")
             inputs.input_ids = torch.cat([old_inputs_ids[0, :idx1], new_txt_ids[0, idx2:]],dim=0).unsqueeze(0).to("cuda")
             inputs.attention_mask= (inputs.input_ids>0).long().to("cuda")
+            
+            
             # 使用CUDA统计model函数的运行时间并用logger打印
             torch.cuda.synchronize()
             start_event = torch.cuda.Event(enable_timing=True)
