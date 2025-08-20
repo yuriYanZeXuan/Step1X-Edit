@@ -25,7 +25,7 @@ MODEL_CONFIG = {
         "flux_model_name": "black-forest-labs/FLUX.1-Kontext-dev",
         "torch_dtype": "bfloat16",
         "model_name": "kontext_dev",
-        "weight_path": "/root/autodl-tmp/weights/Kontext",
+        "weight_path": "/root/highspeedstorage/fx_hd1/weight/Kontext",
         "english_only": True,  # Kontext模型默认只处理英文
     },
     # ICEdit 模型配置
@@ -34,13 +34,13 @@ MODEL_CONFIG = {
         "torch_dtype": "bfloat16",
         "model_name": "icedit",
         "english_only": False,  # ICEdit模型处理所有语言
-        "lora_weights": "/root/autodl-tmp/weights/icedit",
-        'flux_weights': "/root/autodl-tmp/weights/flux"
+        "lora_weights": "/root/highspeedstorage/fx_hd1/weight/icedit",
+        'flux_weights': "/root/highspeedstorage/fx_hd1/weight/flux"
     },
     # Ovis 模型配置
     "ovis": {
         "model_name": "AIDC-AI/Ovis-U1-3B",
-        "weight_path": "/root/autodl-tmp/weights/ovis",
+        "weight_path": "/root/highspeedstorage/fx_hd1/weight/ovis",
         "torch_dtype": "bfloat16",
         "model_name_output": "ovis",
         "english_only": False,  # Ovis模型处理所有语言
@@ -48,12 +48,19 @@ MODEL_CONFIG = {
     # stepedit模型配置
     "stepedit": {
         "model_name": "black-forest-labs/flux.1-stepedit-dev",
-        "model_path": "/root/autodl-tmp/weights/step1xedit",
-        "qwen2vl_model_path": "/root/autodl-tmp/weights/qwen2.5vl",
+        "model_path": "/root/highspeedstorage/fx_hd1/weight/step1xedit",
+        "qwen2vl_model_path": "/root/highspeedstorage/fx_hd1/weight/qwen2.5vl",
         "torch_dtype": "bfloat16",
         "model_name_output": "stepedit",
         "version": "v1.0",
         "english_only": False,  # stepedit模型处理所有语言
+    },
+    # qwenedit模型配置
+    "qwenedit": {
+        "model_path": "/root/highspeedstorage/fx_hd1/weight/qwenedit",
+        "torch_dtype": "bfloat16",
+        "model_name_output": "qwenedit",
+        "english_only": False,  # qwenedit模型处理所有语言
     },
 }
 

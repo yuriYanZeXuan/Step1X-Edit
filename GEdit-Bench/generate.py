@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 
 # os.environ["HF_ENDPOINT"] = os.getenv("HF_ENDPOINT")
-os.environ["HF_HOME"] = os.getenv("HF_HOME")
+# os.environ["HF_HOME"] = os.getenv("HF_HOME")
 
 setup_environment()
 
@@ -387,6 +387,102 @@ class BaseGenerator(ABC):
             logger.info(f"  {task_type}: {len(paths)} 张图像")
 
         return results
+
+
+class QwenEditGenerator(BaseGenerator):
+    """
+    使用 QwenImageEditPipeline 进行图像编辑的生成器
+    """
+
+    def __init__(
+        self,
+        device: torch.device,
+        results_dir: str = "results",
+        model_name: str = "qwenedit",
+        config: dict[str, Any] = None,
+    ):
+        """
+        初始化 QwenEdit 生成器
+
+        Args:
+            device: 使用的设备
+            results_dir: 结果保存目录
+            model_name: 模型名称
+            config: 配置字典
+        """
+        self.device = device
+        self.results_dir = Path(results_dir)
+        self.model_name = model_name
+        self.config = config or get_config('qwenedit')
+        self._initialize_model()
+
+    def _initialize_model(self):
+        """加载 QwenImageEditPipeline 模型"""
+        logger.info("正在加载 QwenImageEditPipeline ...")
+        from diffusers import QwenImageEditPipeline
+
+        model_path = self.config.get(
+            "model_path", "/root/highspeedstorage/fx_hd1/weight/QwenImageEdit"
+        )
+        torch_dtype = getattr(
+            torch, self.config.get("torch_dtype", "bfloat16")
+        )
+        self.pipeline = QwenImageEditPipeline.from_pretrained(
+            model_path,
+            torch_dtype=torch_dtype,
+            low_cpu_mem_usage=True,
+            device_map="cuda" if self.device.type == "cuda" else "cpu",
+        )
+        self.pipeline.set_progress_bar_config(disable=None)
+        logger.info("QwenImageEditPipeline 加载完成")
+
+    def _generate_image(
+        self,
+        original_image: Image.Image,
+        instruction: str,
+        task_type: str = "",
+        instruction_language: str = "",
+        **kwargs,
+    ) -> Image.Image:
+        """
+        使用 QwenImageEditPipeline 生成编辑后的图像
+
+        Args:
+            original_image: 输入的原始图像（PIL.Image）
+            instruction: 编辑指令
+            task_type: 任务类型（可选）
+            instruction_language: 指令语言（可选）
+            **kwargs: 其他参数
+
+        Returns:
+            编辑后的图像（PIL.Image），失败时返回 None
+        """
+        try:
+            gen_config = self.config.get("generation_config", {})
+            prompt = instruction
+            negative_prompt = kwargs.get("negative_prompt", gen_config.get("negative_prompt", " "))
+            num_inference_steps = kwargs.get("num_inference_steps", gen_config.get("num_inference_steps", 50))
+            true_cfg_scale = kwargs.get("true_cfg_scale", gen_config.get("true_cfg_scale", 4.0))
+            seed = kwargs.get("seed", gen_config.get("seed", 0))
+
+            inputs = {
+                "image": original_image,
+                "prompt": prompt,
+                "generator": torch.manual_seed(seed),
+                "true_cfg_scale": true_cfg_scale,
+                "negative_prompt": negative_prompt,
+                "num_inference_steps": num_inference_steps,
+            }
+
+            logger.info(f"QwenEdit 输入参数: prompt={prompt}, steps={num_inference_steps}, cfg={true_cfg_scale}, seed={seed}")
+
+            with torch.inference_mode():
+                output = self.pipeline(**inputs)
+                output_image = output.images[0]
+                return output_image
+        except Exception as e:
+            logger.error(f"QwenEdit 生成图像失败: {e}")
+            return None
 
 
 class KontextEvalGenerator(BaseGenerator):
@@ -1054,7 +1150,7 @@ def main():
         "--model_type",
         type=str,
         default="kontext",
-        choices=["stepedit","kontext", "icedit", "ovis"],
+        choices=["stepedit","kontext", "icedit", "ovis","qwenedit"],
         help="模型类型:stepedit、kontext、icedit 或 ovis",
     )
     parser.add_argument(
@@ -1122,6 +1218,8 @@ def main():
         generator_class = OvisGenerator
     elif args.model_type == "stepedit":
         generator_class = StepEditGenerator
+    elif args.model_type == "qwenedit":
+        generator_class = QwenEditGenerator
     else:
         raise ValueError(f"不支持的模型类型: {args.model_type}")
 
